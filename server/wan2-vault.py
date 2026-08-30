@@ -611,7 +611,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dashboard_page(self, csrf: str) -> bytes:
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WAN Vault</title><link rel="stylesheet" href="/assets/style.css"></head>
-<body><main class="card"><h1>WeiG WAN Vault</h1><p class="sub">Current private WAN status</p>
+<body><main class="card"><h1>WeiG WAN Vault</h1><p class="sub">Current WAN status</p>
 <div class="toolbar"><label class="label" for="interface-select">Display interface</label><select id="interface-select"><option value="all">All WANs</option></select></div>
 <div id="wan-list" class="wan-list"><p class="small">Loading…</p></div>
 <div class="meta">
