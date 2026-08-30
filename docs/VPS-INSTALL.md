@@ -1,12 +1,4 @@
-# VPS Installation
-
-## Requirements
-
-- Debian or Ubuntu
-- systemd
-- Python 3
-- curl or wget
-- OpenSSL
+# VPS installation and upgrades
 
 ## Install
 
@@ -16,38 +8,53 @@ curl -fsSLo /tmp/wan2-vault-install.sh \
 sudo bash /tmp/wan2-vault-install.sh
 ```
 
-The installer creates:
-
-```text
-/etc/wan2-vault/config.json
-/etc/wan2-vault/auth.json
-/etc/wan2-vault/secrets.json
-/var/lib/wan2-vault/
-/usr/local/lib/wan2-vault/wan2-vault.py
-/etc/systemd/system/wan2-vault.service
-```
-
-The service runs as the dedicated `wan2vault` system user.
-
-## Verify bind address
-
-```bash
-ss -lntp | grep 29444
-```
-
-Expected:
+The application binds only:
 
 ```text
 127.0.0.1:29444
 ```
 
-If it shows `0.0.0.0:29444`, stop and fix the deployment before publishing it.
+The installer creates login credentials, a dedicated WRITE_TOKEN, and the systemd service.
 
-## Service status
+## Management
 
 ```bash
-systemctl status wan2-vault --no-pager
-journalctl -u wan2-vault --no-pager -n 50
+sudo wan2-vault status
+sudo wan2-vault version
+sudo wan2-vault check-update
+sudo wan2-vault upgrade
+sudo wan2-vault rollback
+sudo wan2-vault manage
 ```
 
-The application disables normal HTTP access logging and does not intentionally log passwords, tokens, cookies, or WAN IP history.
+## Upgrade behavior
+
+`wan2-vault upgrade` downloads the latest application, service, CLI and VERSION, then:
+
+1. validates Python and shell syntax;
+2. creates a timestamped backup under `/var/lib/wan2-vault/backups/`;
+3. installs the new files;
+4. restarts systemd;
+5. performs a localhost health check using the configured Host header;
+6. automatically restores the backup if activation fails.
+
+Configuration, credentials, session data and WRITE_TOKEN are not replaced.
+
+## v1.0 state migration
+
+The v1.1 server can read the old:
+
+```json
+{"ip":"203.0.113.10","updated_at":1234567890}
+```
+
+as a `WAN2` record. No manual state-file conversion is required.
+
+## Ingress
+
+Choose one:
+
+- Cloudflare Tunnel -> `http://127.0.0.1:29444`
+- Cloudflare proxy -> local Nginx/reverse proxy -> `http://127.0.0.1:29444`
+
+The reverse proxy must preserve Cloudflare's `CF-Connecting-IP` header.
