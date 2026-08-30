@@ -2,17 +2,17 @@
 
 一个面向 OpenWrt 多 WAN 动态公网 IPv4 场景的轻量私有 IP Vault。
 
-OpenWrt 每 5 分钟只在本机检查 WAN 状态。**IPv4 或出口设备没有变化时不会向 Cloudflare/VPS 发请求**；发生变化时，每个 WAN 都通过自己的 `l3_device` 单独上报，因此服务端仍能校验：
+OpenWrt 每 5 分钟只在本机检查 WAN 状态。**IPv4、出口设备和 WAN 接口集合都没有变化时，不会向 Cloudflare/VPS 发请求**；发生变化时，每个 WAN 都通过自己的 `l3_device` 单独上报，因此服务端仍能校验：
 
 ```text
 posted IPv4 == CF-Connecting-IP
 ```
 
-网页登录后可以查看全部 WAN，也可以在下拉框中只显示某一个 WAN。页面显示精确的最后 IP 变化时间、最后上报时间、最近上报结果和页面刷新时间。
+网页登录后可以查看全部 WAN，也可以在下拉框中只显示某一个 WAN。页面显示最后 IP 变化时间、最后上报时间、最近上报结果和页面刷新时间。
 
 > 仓库本身不保存你的真实域名、用户名、密码、WRITE_TOKEN、VPS IP 或家庭 WAN IP。文档统一使用 `notify.example.com`。
 
-## v1.1.0 highlights
+## Current highlights
 
 - Multi-WAN：自动发现所有处于 `up`、有 IPv4、且拥有 IPv4 默认路由的 OpenWrt 接口。
 - Manual mode：也可以只跟踪指定接口，例如 `WAN WAN2`。
@@ -22,9 +22,12 @@ posted IPv4 == CF-Connecting-IP
 - 显示 `Last IP change`、`Last report`、`Last report status`、`Page refreshed`。
 - 接口消失后通过 inventory 同步为 `Inactive`，历史最后 IP 仍保留供排错。
 - 服务端自动兼容并迁移 v1.0 单 WAN `current.json`。
-- VPS 和 OpenWrt 都提供 `wan2-vault upgrade` 一键升级。
+- VPS 和 OpenWrt 都提供一键升级。
 - VPS 升级前自动备份应用、service、版本和当前状态；失败自动回滚。
-- OpenWrt v1.0 升级时保留原单 WAN 选择；需要多 WAN 时执行 `wan2-vault interfaces auto`。
+- OpenWrt 升级支持仓库 v1 安装和更早期的手工部署布局。
+- OpenWrt 脚本使用 BusyBox 基础命令，不要求额外提供 coreutils `install` 命令。
+
+当前版本见 [`VERSION`](VERSION)。
 
 ## 架构
 
@@ -53,7 +56,7 @@ Browser
 127.0.0.1:29444
 ```
 
-公网入口有两种受支持方式：
+公网入口支持两种方式：
 
 1. **Cloudflare Tunnel**：Cloudflare Tunnel -> `http://127.0.0.1:29444`
 2. **Cloudflare Proxy + Nginx**：Cloudflare -> VPS `443` -> Nginx/reverse proxy -> `http://127.0.0.1:29444`
@@ -110,8 +113,6 @@ sudo wan2-vault manage
 
 ### 方案 A：Cloudflare Tunnel
 
-仓库保留辅助安装脚本：
-
 ```bash
 curl -fsSLo /tmp/install-cloudflared.sh \
   https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main/server/install-cloudflared.sh
@@ -130,7 +131,7 @@ Service:  http://127.0.0.1:29444
 
 ### 方案 B：Cloudflare Proxy + Nginx
 
-适合 VPS 已经使用 Nginx `stream` / SNI 分流的场景。典型链路：
+典型链路：
 
 ```text
 Cloudflare HTTPS
@@ -153,6 +154,8 @@ ubus
 jsonfilter
 curl
 ```
+
+脚本还会使用 OpenWrt/BusyBox 常见的 `cp`、`mkdir`、`chmod`、`mv`、`sed`、`grep`、`sort`。**不要求单独安装 coreutils `install`。**
 
 安装：
 
@@ -235,9 +238,9 @@ curl --interface pppoe-WAN2
 POST {"interface":"WAN2","device":"pppoe-WAN2","ip":"2.2.2.2"}
 ```
 
-服务端分别验证请求携带的 IPv4 与 Cloudflare 实际看到的 IPv4 一致。这样支持 Multi-WAN 时不会降低 v1.0 的来源校验。
+服务端分别验证请求携带的 IPv4 与 Cloudflare 实际看到的 IPv4 一致。Multi-WAN 不降低原来的来源校验。
 
-`/api/v1/inventory` 只负责同步接口名称/设备/Active 状态，不替代 IP 来源校验。
+`/api/v1/inventory` 只负责同步接口名称、设备和 Active 状态，不替代 IP 来源校验。
 
 ## 5. 网页状态
 
@@ -270,7 +273,7 @@ Current client IP     ...
 sudo wan2-vault upgrade
 ```
 
-也可以继续使用独立更新脚本：
+也可以运行独立更新脚本：
 
 ```bash
 curl -fsSLo /tmp/wan2-vault-update.sh \
@@ -278,14 +281,7 @@ curl -fsSLo /tmp/wan2-vault-update.sh \
 sudo bash /tmp/wan2-vault-update.sh
 ```
 
-升级不会覆盖：
-
-```text
-/etc/wan2-vault/
-/var/lib/wan2-vault/sessions.json
-```
-
-升级前会备份当前应用、systemd service、版本和 `current.json`。安装后执行 Python 语法检查、systemd 重启和 localhost health check；失败会自动恢复。
+升级不会覆盖 `/etc/wan2-vault/` 中的登录/Token 配置，也不会清除浏览器 Sessions。升级前会备份应用、systemd service、版本和 `current.json`，并在失败时自动恢复。
 
 手动回滚最近一次升级：
 
@@ -295,11 +291,13 @@ sudo wan2-vault rollback
 
 ### OpenWrt
 
+新版安装后直接：
+
 ```sh
 wan2-vault upgrade
 ```
 
-v1.0 的旧安装可以先运行新版 updater：
+旧安装可先运行 updater：
 
 ```sh
 wget -O /tmp/wan2-vault-update.sh \
@@ -308,13 +306,50 @@ wget -O /tmp/wan2-vault-update.sh \
 sh /tmp/wan2-vault-update.sh
 ```
 
-为了避免旧设备升级后突然开始上传额外 WAN，v1.0 的单 WAN 配置会迁移为 `manual`。确认后切换：
+升级器支持两类旧布局。
+
+仓库 v1 单 WAN 配置，例如：
+
+```text
+/etc/wan2-vault.conf
+WAN_INTERFACE='WAN2'
+```
+
+以及更早期的手工部署，例如：
+
+```text
+/etc/wan2-vault.token
+/etc/wan2-vault.last-ip
+/usr/bin/wan2-vault-report
+/etc/hotplug.d/iface/95-wan2-vault
+/etc/init.d/wan2-vault-report
+```
+
+对早期手工部署，升级器会自动从旧 reporter 读取 hostname 和接口名，并迁移现有 Token，**不会把 Token 输出到终端**。迁移后的主要布局为：
+
+```text
+/etc/wan2-vault.conf
+/etc/wan2-vault-state/
+/usr/bin/wan2-vault-report
+/usr/bin/wan2-vault
+```
+
+为了避免旧设备升级后突然开始上传额外 WAN，旧单 WAN 会先迁移为：
+
+```text
+MODE='manual'
+INTERFACES='原接口名'
+```
+
+确认后再切换：
 
 ```sh
 wan2-vault interfaces auto
 ```
 
-## 7. v1.0 兼容
+旧 hotplug/init/token 状态文件只在新版布局成功落地后清理；升级失败时会回滚旧配置和调度文件。
+
+## 7. v1.0 API / 状态兼容
 
 旧客户端仍可发送：
 
@@ -322,11 +357,7 @@ wan2-vault interfaces auto
 {"ip":"203.0.113.10"}
 ```
 
-服务端会把它视为：
-
-```text
-interface = WAN2
-```
+服务端会把它视为 `WAN2`。
 
 旧状态：
 
