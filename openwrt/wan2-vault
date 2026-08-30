@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+RAW_BASE="${WAN2VAULT_RAW_BASE:-https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main}"
+CONFIG_FILE="/etc/wan2-vault.conf"
+REPORTER="/usr/bin/wan2-vault-report"
+VERSION_FILE="/usr/share/wan2-vault/VERSION"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+[ "$(id -u)" = "0" ] || fail "Run as root."
+[ -r "$CONFIG_FILE" ] || fail "WeiG-WAN2-Vault is not installed on this OpenWrt device."
+
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
+MODE="${MODE:-manual}"
+INTERFACES="${INTERFACES:-${WAN_INTERFACE:-WAN2}}"
+
+write_config() {
+    mode="$1"
+    interfaces="$2"
+    tmp="${CONFIG_FILE}.tmp.$$"
+    umask 077
+    cat > "$tmp" <<EOF
+HOSTNAME='$HOSTNAME'
+MODE='$mode'
+INTERFACES='$interfaces'
+WRITE_TOKEN='$WRITE_TOKEN'
+EOF
+    chmod 600 "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+}
+
+show_status() {
+    echo "WeiG WAN Vault"
+    echo "Version:    $(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
+    echo "Hostname:   $HOSTNAME"
+    echo "Mode:       $MODE"
+    [ "$MODE" = "manual" ] && echo "Interfaces: $INTERFACES"
+    echo "Schedule:   every 5 minutes"
+    echo
+    echo "Active WAN candidates:"
+    LIST_ONLY=1 "$REPORTER" | while IFS='|' read -r name ip dev; do
+        [ -n "$name" ] && printf '  %-16s %-18s %s\n' "$name" "$ip" "$dev"
+    done
+}
+
+upgrade() {
+    tmp="/tmp/wan2-vault-update.$$"
+    trap 'rm -f "$tmp"' EXIT INT TERM
+    curl -fsSL "$RAW_BASE/openwrt/update.sh" -o "$tmp"
+    sh "$tmp"
+}
+
+case "${1:-status}" in
+    status)
+        show_status
+        ;;
+    version)
+        cat "$VERSION_FILE" 2>/dev/null || echo "unknown"
+        ;;
+    report)
+        FORCE=1 FORCE_INVENTORY=1 "$REPORTER"
+        ;;
+    interfaces)
+        case "${2:-show}" in
+            show)
+                show_status
+                ;;
+            auto)
+                write_config auto ""
+                echo "Tracking mode changed to auto."
+                FORCE=1 FORCE_INVENTORY=1 "$REPORTER"
+                ;;
+            set)
+                shift 2
+                [ "$#" -gt 0 ] || fail "Usage: wan2-vault interfaces set WAN WAN2 ..."
+                interfaces=""
+                for name in "$@"; do
+                    case "$name" in ''|*[!A-Za-z0-9_.:@-]*) fail "Invalid interface: $name" ;; esac
+                    interfaces="${interfaces}${interfaces:+ }${name}"
+                done
+                write_config manual "$interfaces"
+                echo "Tracking interfaces: $interfaces"
+                FORCE=1 FORCE_INVENTORY=1 "$REPORTER"
+                ;;
+            *) fail "Usage: wan2-vault interfaces [show|auto|set WAN WAN2 ...]" ;;
+        esac
+        ;;
+    upgrade)
+        upgrade
+        ;;
+    *)
+        cat <<'EOF'
+Usage: wan2-vault <command>
+
+Commands:
+  status                         Show configuration and detected WANs
+  version                        Show installed version
+  report                         Force a report and inventory sync
+  interfaces                     Show current tracking mode
+  interfaces auto                Track every active IPv4 default-route WAN
+  interfaces set WAN WAN2 ...    Track only selected OpenWrt interfaces
+  upgrade                        Upgrade from GitHub with rollback on failure
+EOF
+        exit 1
+        ;;
+esac
