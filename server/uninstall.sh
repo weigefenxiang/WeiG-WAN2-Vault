@@ -5,10 +5,11 @@ set -euo pipefail
 
 systemctl disable --now wan2-vault.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/wan2-vault.service
+rm -f /usr/local/sbin/wan2-vault
 rm -rf /usr/local/lib/wan2-vault
 systemctl daemon-reload
 
-printf 'Delete local configuration, sessions, and the current WAN IP too? [y/N]: '
+printf 'Delete local configuration, sessions, WAN state, and update backups too? [y/N]: '
 read -r PURGE
 case "$PURGE" in
     y|Y|yes|YES)
