@@ -8,6 +8,7 @@ STATE_DIR="/var/lib/wan2-vault"
 LIB_DIR="/usr/local/lib/wan2-vault"
 SERVICE_FILE="/etc/systemd/system/wan2-vault.service"
 SERVICE_NAME="wan2-vault.service"
+CLI_FILE="/usr/local/sbin/wan2-vault"
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '==> %s\n' "$*"; }
@@ -29,11 +30,9 @@ install_pkg_if_missing() {
 
 install_pkg_if_missing python3 python3
 install_pkg_if_missing openssl openssl
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    install_pkg_if_missing curl curl
-fi
+install_pkg_if_missing curl curl
 
-printf '\nWeiG WAN2 Vault installer\n\n'
+printf '\nWeiG WAN Vault installer\n\n'
 
 while :; do
     read -r -p "Public hostname (example: notify.example.com): " PUBLIC_HOSTNAME
@@ -84,23 +83,31 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"; unset LOGIN_PASSWORD || true' EXIT
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
-fetch_file() {
+fetch_server_file() {
     local rel="$1" out="$2"
     if [ -f "$SCRIPT_DIR/$rel" ]; then
         cp "$SCRIPT_DIR/$rel" "$out"
-    elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$RAW_BASE/server/$rel" -o "$out"
     else
-        wget -qO "$out" "$RAW_BASE/server/$rel"
+        curl -fsSL "$RAW_BASE/server/$rel" -o "$out"
     fi
 }
 
 info "Installing server application."
-fetch_file "wan2-vault.py" "$TMP_DIR/wan2-vault.py"
-fetch_file "wan2-vault.service" "$TMP_DIR/wan2-vault.service"
+fetch_server_file "wan2-vault.py" "$TMP_DIR/wan2-vault.py"
+fetch_server_file "wan2-vault.service" "$TMP_DIR/wan2-vault.service"
+fetch_server_file "wan2-vault" "$TMP_DIR/wan2-vault-cli"
+if [ -f "$SCRIPT_DIR/../VERSION" ]; then
+    cp "$SCRIPT_DIR/../VERSION" "$TMP_DIR/VERSION"
+else
+    curl -fsSL "$RAW_BASE/VERSION" -o "$TMP_DIR/VERSION"
+fi
+
 python3 -m py_compile "$TMP_DIR/wan2-vault.py"
+bash -n "$TMP_DIR/wan2-vault-cli"
 install -o root -g root -m 0755 "$TMP_DIR/wan2-vault.py" "$LIB_DIR/wan2-vault.py"
 install -o root -g root -m 0644 "$TMP_DIR/wan2-vault.service" "$SERVICE_FILE"
+install -o root -g root -m 0755 "$TMP_DIR/wan2-vault-cli" "$CLI_FILE"
+install -o root -g root -m 0644 "$TMP_DIR/VERSION" "$LIB_DIR/VERSION"
 
 SALT_HEX="$(openssl rand -hex 16)"
 WRITE_TOKEN="$(openssl rand -hex 32)"
@@ -163,14 +170,18 @@ HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: $PUBLIC_HOSTNAME"
 [ "$HTTP_CODE" = "200" ] || fail "Local self-test failed (HTTP $HTTP_CODE)."
 
 printf '\n============================================================\n'
-printf ' WeiG WAN2 Vault installed successfully\n'
+printf ' WeiG WAN Vault installed successfully\n'
 printf '============================================================\n\n'
+printf 'Version:       %s\n' "$(cat "$LIB_DIR/VERSION")"
 printf 'Hostname:      %s\n' "$PUBLIC_HOSTNAME"
 printf 'Backend:       127.0.0.1:29444 (localhost only)\n'
 printf 'WRITE_TOKEN:   %s\n' "$WRITE_TOKEN"
 printf '\nSave the WRITE_TOKEN on your OpenWrt device. Do not publish it.\n'
 printf 'It is also stored locally in: %s/secrets.json\n\n' "$ETC_DIR"
-printf 'Next: create a Cloudflare Tunnel published application:\n'
-printf '  Hostname: %s\n' "$PUBLIC_HOSTNAME"
-printf '  Service:  http://127.0.0.1:29444\n\n'
-printf 'No Nginx change, origin certificate, or new inbound VPS port is required.\n'
+printf 'Expose the localhost backend through either:\n'
+printf '  A) Cloudflare Tunnel -> http://127.0.0.1:29444\n'
+printf '  B) Cloudflare proxy -> Nginx/reverse proxy -> http://127.0.0.1:29444\n\n'
+printf 'Management:\n'
+printf '  wan2-vault status\n'
+printf '  wan2-vault upgrade\n'
+printf '  wan2-vault manage\n'
