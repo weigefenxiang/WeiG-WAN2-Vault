@@ -11,18 +11,27 @@ STATE_DIR="/etc/wan2-vault-state"
 CRON_FILE="/etc/crontabs/root"
 CRON_MARK="# WeiG-WAN2-Vault"
 SYSUPGRADE="/etc/sysupgrade.conf"
+CACHE_BUST="${WAN2VAULT_CACHE_BUST:-$(date +%s)}"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 [ "$(id -u)" = "0" ] || fail "Run as root."
 [ -r "$CONFIG_FILE" ] || fail "WeiG-WAN2-Vault is not installed."
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 
+fetch_raw() {
+    rel="$1"
+    out="$2"
+    sep='?'
+    case "$RAW_BASE" in *\?*) sep='&' ;; esac
+    curl -fsSL -H 'Cache-Control: no-cache' "${RAW_BASE}/${rel}${sep}_=${CACHE_BUST}" -o "$out"
+}
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
-curl -fsSL "$RAW_BASE/openwrt/wan2-ipnotify.sh" -o "$TMP_DIR/reporter"
-curl -fsSL "$RAW_BASE/openwrt/wan2-vault" -o "$TMP_DIR/cli"
-curl -fsSL "$RAW_BASE/VERSION" -o "$TMP_DIR/VERSION"
+fetch_raw "openwrt/wan2-ipnotify.sh" "$TMP_DIR/reporter"
+fetch_raw "openwrt/wan2-vault" "$TMP_DIR/cli"
+fetch_raw "VERSION" "$TMP_DIR/VERSION"
 sh -n "$TMP_DIR/reporter"
 sh -n "$TMP_DIR/cli"
 
