@@ -22,6 +22,15 @@ info() { echo "==> $*"; }
 [ "$(id -u)" = "0" ] || fail "Run as root."
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 
+copy_mode() {
+    src="$1"
+    dst="$2"
+    mode="$3"
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+    chmod "$mode" "$dst"
+}
+
 if [ ! -r "$CONFIG_FILE" ]; then
     if [ -r "$LEGACY_TOKEN_FILE" ] && [ -r "$REPORTER" ]; then
         LEGACY_MANUAL=1
@@ -159,14 +168,14 @@ MODE='manual'
 INTERFACES='$OLD_IF'
 WRITE_TOKEN='$WRITE_TOKEN'
 EOF
-        install -m 600 "$tmp_conf" "$CONFIG_FILE"
+        copy_mode "$tmp_conf" "$CONFIG_FILE" 600
     fi
 fi
 
-install -m 700 "$TMP_DIR/reporter" "$REPORTER"
-install -m 700 "$TMP_DIR/cli" "$CLI"
+copy_mode "$TMP_DIR/reporter" "$REPORTER" 700
+copy_mode "$TMP_DIR/cli" "$CLI" 700
 mkdir -p "$(dirname "$VERSION_FILE")" "$STATE_DIR/interfaces"
-install -m 644 "$TMP_DIR/VERSION" "$VERSION_FILE"
+copy_mode "$TMP_DIR/VERSION" "$VERSION_FILE" 644
 chmod 700 "$STATE_DIR" "$STATE_DIR/interfaces"
 
 mkdir -p /etc/crontabs
