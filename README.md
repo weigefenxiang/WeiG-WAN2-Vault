@@ -300,6 +300,15 @@ Private / 私网
 
 ## 5. 网页状态与排序
 
+网页页头统一显示：
+
+```text
+WeiG WAN Vault
+Current WAN status
+```
+
+这里不再使用 `Current private WAN status`，因为页面同时展示公网 WAN 与私网/CGNAT WAN。
+
 登录后默认显示全部 WAN，并按以下顺序排序：
 
 ```text
