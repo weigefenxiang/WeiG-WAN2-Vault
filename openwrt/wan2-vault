@@ -16,6 +16,15 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 MODE="${MODE:-manual}"
 INTERFACES="${INTERFACES:-${WAN_INTERFACE:-WAN2}}"
 
+raw_fetch() {
+    rel="$1"
+    out="$2"
+    sep='?'
+    stamp="$(date +%s)"
+    case "$RAW_BASE" in *\?*) sep='&' ;; esac
+    curl -fsSL -H 'Cache-Control: no-cache' "${RAW_BASE}/${rel}${sep}_=${stamp}" -o "$out"
+}
+
 write_config() {
     mode="$1"
     interfaces="$2"
@@ -48,8 +57,10 @@ show_status() {
 upgrade() {
     tmp="/tmp/wan2-vault-update.$$"
     trap 'rm -f "$tmp"' EXIT INT TERM
-    curl -fsSL "$RAW_BASE/openwrt/update.sh" -o "$tmp"
+    raw_fetch "openwrt/update.sh" "$tmp"
     sh "$tmp"
+    rm -f "$tmp"
+    trap - EXIT INT TERM
 }
 
 case "${1:-status}" in
