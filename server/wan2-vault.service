@@ -1,0 +1,29 @@
+[Unit]
+Description=WeiG WAN2 Vault
+After=network.target
+
+[Service]
+Type=simple
+User=wan2vault
+Group=wan2vault
+ExecStart=/usr/bin/python3 /usr/local/lib/wan2-vault/wan2-vault.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadOnlyPaths=/etc/wan2-vault /usr/local/lib/wan2-vault
+ReadWritePaths=/var/lib/wan2-vault
+
+[Install]
+WantedBy=multi-user.target
