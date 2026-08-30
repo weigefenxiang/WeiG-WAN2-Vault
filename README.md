@@ -1,25 +1,31 @@
 # WeiG-WAN2-Vault
 
-一个面向 OpenWrt 多 WAN 动态公网 IPv4 场景的轻量私有 IP Vault。
+一个面向 OpenWrt 多 WAN IPv4 场景的轻量私有 IP Vault，同时支持**公网 WAN**与**私网/CGNAT WAN**。
 
-OpenWrt 每 5 分钟只在本机检查 WAN 状态。**IPv4、出口设备和 WAN 接口集合都没有变化时，不会向 Cloudflare/VPS 发请求**；发生变化时，每个 WAN 都通过自己的 `l3_device` 单独上报，因此服务端仍能校验：
+OpenWrt 每 5 分钟只在本机检查 WAN 状态。**IPv4、出口设备和 WAN 接口集合都没有变化时，不会向 Cloudflare/VPS 发请求**；发生变化时，每个 WAN 都通过自己的 `l3_device` 单独上报。
+
+网页登录后可以查看全部 WAN，也可以在下拉框中只显示某一个 WAN。页面会明确标注：
 
 ```text
-posted IPv4 == CF-Connecting-IP
+Public / 公网
+Private / 私网
 ```
 
-网页登录后可以查看全部 WAN，也可以在下拉框中只显示某一个 WAN。页面显示最后 IP 变化时间、最后上报时间、最近上报结果和页面刷新时间。
+在 `All WANs` 视图中，**Active 公网 WAN 优先显示，私网 WAN 排在公网 WAN 后面**。因此如果 `WAN2` 是公网、`WAN` 是私网，网页会先显示 `WAN2`。
 
 > 仓库本身不保存你的真实域名、用户名、密码、WRITE_TOKEN、VPS IP 或家庭 WAN IP。文档统一使用 `notify.example.com`。
 
 ## Current highlights
 
 - Multi-WAN：自动发现所有处于 `up`、有 IPv4、且拥有 IPv4 默认路由的 OpenWrt 接口。
+- 同时记录公网 WAN 和 RFC1918/CGNAT 私网 WAN。
 - Manual mode：也可以只跟踪指定接口，例如 `WAN WAN2`。
 - 每 5 分钟本地检查；状态不变时零上报。
-- 每个 WAN 独立通过自己的 `l3_device` 上报，保留 Cloudflare 来源 IP 校验。
-- 网页支持 `All WANs` / 单 WAN 选择，选择结果只保存在浏览器 `localStorage`。
-- 显示 `Last IP change`、`Last report`、`Last report status`、`Page refreshed`。
+- 每个 WAN 独立通过自己的 `l3_device` 上报。
+- 公网 WAN 保留严格的 Cloudflare 来源 IPv4 校验。
+- 私网/CGNAT WAN 因为地址不可能等于 Cloudflare 看到的公网源地址，所以使用 WRITE_TOKEN 鉴权，并明确标记为 `Private`。
+- 网页 `All WANs` 默认公网优先、私网靠后；也可选择单独 WAN。
+- 显示 `Address type`、`Last IP change`、`Last report`、`Last report status`、`Page refreshed`。
 - 接口消失后通过 inventory 同步为 `Inactive`，历史最后 IP 仍保留供排错。
 - 服务端自动兼容并迁移 v1.0 单 WAN `current.json`。
 - VPS 和 OpenWrt 都提供一键升级。
@@ -33,9 +39,9 @@ posted IPv4 == CF-Connecting-IP
 
 ```text
 OpenWrt
-  ├─ WAN  ── curl --interface <WAN l3_device>  ─┐
-  ├─ WAN2 ── curl --interface <WAN2 l3_device> ─┼─> Cloudflare ─> VPS
-  └─ WAN3 ── curl --interface <WAN3 l3_device> ─┘
+  ├─ WAN  (Private) ─ curl --interface <WAN l3_device>  ─┐
+  ├─ WAN2 (Public)  ─ curl --interface <WAN2 l3_device> ─┼─> Cloudflare ─> VPS
+  └─ WAN3           ─ curl --interface <WAN3 l3_device> ─┘
 
 VPS
   └─ 127.0.0.1:29444
@@ -45,6 +51,8 @@ Browser
   └─ https://notify.example.com
       ├─ login
       ├─ All WANs / selected WAN
+      ├─ Public / Private label
+      ├─ public WANs first
       ├─ last IP change
       ├─ last report status/time
       └─ page refreshed time
@@ -173,6 +181,13 @@ sh /tmp/wan2-vault-install.sh
 2) Manual - 只跟踪指定接口
 ```
 
+Auto 模式不会排除私网 WAN。例如：
+
+```text
+WAN   172.20.x.x    pppoe-WAN     -> Private / 私网
+WAN2  163.x.x.x     pppoe-WAN2    -> Public / 公网
+```
+
 新安装推荐 `Auto`。
 
 安装后：
@@ -217,49 +232,108 @@ wan2-vault interfaces set WAN WAN2
 
 详见 [`docs/OPENWRT-INSTALL.md`](docs/OPENWRT-INSTALL.md)。
 
-## 4. 多 WAN 上报安全模型
+## 4. 多 WAN 上报与校验模型
 
-假设：
-
-```text
-WAN  = 1.1.1.1
-WAN2 = 2.2.2.2
-```
-
-客户端不会把两个 IP 放进一次更新请求，而是分别：
+客户端不会把多个 WAN 放进同一个更新请求，而是分别通过对应 `l3_device` 发出：
 
 ```text
 WAN:
 curl --interface pppoe-WAN
-POST {"interface":"WAN","device":"pppoe-WAN","ip":"1.1.1.1"}
+POST {"interface":"WAN","device":"pppoe-WAN","ip":"172.20.10.2"}
 
 WAN2:
 curl --interface pppoe-WAN2
-POST {"interface":"WAN2","device":"pppoe-WAN2","ip":"2.2.2.2"}
+POST {"interface":"WAN2","device":"pppoe-WAN2","ip":"203.0.113.20"}
 ```
 
-服务端分别验证请求携带的 IPv4 与 Cloudflare 实际看到的 IPv4 一致。Multi-WAN 不降低原来的来源校验。
+### 公网 WAN
 
-`/api/v1/inventory` 只负责同步接口名称、设备和 Active 状态，不替代 IP 来源校验。
-
-## 5. 网页状态
-
-登录后默认显示全部 WAN：
+公网 WAN 继续执行严格校验：
 
 ```text
-WAN
-  IPv4               ...
-  Device              ...
-  Last report status  Success
-  Last IP change      2026-08-30 18:20:00 · 24m ago
-  Last report         2026-08-30 18:20:00 · 24m ago
-
-WAN2
-  ...
-
-Page refreshed        2026-08-30 18:44:15
-Current client IP     ...
+posted IPv4 == CF-Connecting-IP
 ```
+
+不一致时服务端返回：
+
+```text
+source_mismatch
+```
+
+并且不会覆盖上一次成功记录。
+
+### 私网 / CGNAT WAN
+
+RFC1918：
+
+```text
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+```
+
+以及 CGNAT：
+
+```text
+100.64.0.0/10
+```
+
+这类地址本身不可能等于 Cloudflare 看到的公网源 IP，因此不能使用 `posted IPv4 == CF-Connecting-IP` 进行证明。
+
+对于这些接口，服务端要求：
+
+```text
+有效 WRITE_TOKEN
++ 请求必须经过 Cloudflare
++ OpenWrt 仍通过该 WAN 的 l3_device 发出请求
+```
+
+然后保存该私网 IPv4，并在网页明确显示：
+
+```text
+Private / 私网
+```
+
+这意味着：**公网 WAN 的 IP 有来源 IP 强校验；私网 WAN 的 IP 主要依赖 WRITE_TOKEN 和路由绑定，安全语义不同，网页会明确区分。**
+
+`/api/v1/inventory` 只负责同步接口名称、设备和 Active 状态。
+
+## 5. 网页状态与排序
+
+登录后默认显示全部 WAN，并按以下顺序排序：
+
+```text
+1. Active + Public
+2. Active + Private
+3. Inactive + Public
+4. Inactive + Private
+```
+
+同一组内按接口名排序。
+
+例如：
+
+```text
+WAN2
+  Active · Public
+  IPv4               163.x.x.x
+  Address type        Public / 公网
+  Device              pppoe-WAN2
+  Last report status  Success
+  Last IP change      ...
+  Last report         ...
+
+WAN
+  Active · Private
+  IPv4               172.20.x.x
+  Address type        Private / 私网
+  Device              pppoe-WAN
+  Last report status  Success
+  Last IP change      ...
+  Last report         ...
+```
+
+因此公网 `WAN2` 会显示在私网 `WAN` 上方。
 
 顶部下拉框可以选择某一个 WAN。这个选择只保存在当前浏览器，不会改变 OpenWrt 上传哪些接口。
 
@@ -325,16 +399,9 @@ WAN_INTERFACE='WAN2'
 /etc/init.d/wan2-vault-report
 ```
 
-对早期手工部署，升级器会自动从旧 reporter 读取 hostname 和接口名，并迁移现有 Token，**不会把 Token 输出到终端**。迁移后的主要布局为：
+对早期手工部署，升级器会自动从旧 reporter 读取 hostname 和接口名，并迁移现有 Token，**不会把 Token 输出到终端**。
 
-```text
-/etc/wan2-vault.conf
-/etc/wan2-vault-state/
-/usr/bin/wan2-vault-report
-/usr/bin/wan2-vault
-```
-
-为了避免旧设备升级后突然开始上传额外 WAN，旧单 WAN 会先迁移为：
+为了避免旧设备升级后突然开始上传额外 WAN，旧单 WAN会先迁移为：
 
 ```text
 MODE='manual'
@@ -346,8 +413,6 @@ INTERFACES='原接口名'
 ```sh
 wan2-vault interfaces auto
 ```
-
-旧 hotplug/init/token 状态文件只在新版布局成功落地后清理；升级失败时会回滚旧配置和调度文件。
 
 ## 7. v1.0 API / 状态兼容
 
