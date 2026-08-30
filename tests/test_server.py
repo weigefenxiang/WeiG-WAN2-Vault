@@ -45,7 +45,10 @@ class ServerTest(unittest.TestCase):
         env = os.environ.copy()
         env["WAN2VAULT_CONFIG_DIR"] = str(cls.etc)
         env["WAN2VAULT_STATE_DIR"] = str(cls.state)
-        cls.proc = subprocess.Popen(["python3", str(APP)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.proc = subprocess.Popen(
+            ["python3", str(APP)], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
@@ -67,6 +70,12 @@ class ServerTest(unittest.TestCase):
         cls.proc.wait(timeout=5)
         cls.tmp.cleanup()
 
+    def setUp(self):
+        try:
+            (self.state / "current.json").unlink()
+        except FileNotFoundError:
+            pass
+
     def request(self, method, path, body=None, headers=None):
         h = {"Host": "notify.example.com"}
         if headers:
@@ -80,23 +89,7 @@ class ServerTest(unittest.TestCase):
         conn.close()
         return status, out_headers, data
 
-    def test_bad_host_rejected(self):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request("GET", "/", headers={"Host": "evil.example.com"})
-        r = conn.getresponse()
-        r.read()
-        self.assertEqual(r.status, 421)
-        conn.close()
-
-    def test_update_and_browser_read(self):
-        payload = json.dumps({"ip": "203.0.113.10"}).encode()
-        status, _, _ = self.request("POST", "/api/v1/update", payload, {
-            "CF-Connecting-IP": "203.0.113.10",
-            "Authorization": "Bearer " + "a" * 64,
-            "Content-Type": "application/json",
-        })
-        self.assertEqual(status, 204)
-
+    def login_cookie(self):
         form = urlencode({
             "username": "testuser",
             "password": "correct horse battery staple",
@@ -107,24 +100,100 @@ class ServerTest(unittest.TestCase):
             "Content-Type": "application/x-www-form-urlencoded",
         })
         self.assertEqual(status, 303)
-        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        return headers["Set-Cookie"].split(";", 1)[0]
+
+    def post_update(self, interface, ip, source=None, device=""):
+        payload = {"interface": interface, "ip": ip, "device": device}
+        return self.request("POST", "/api/v1/update", json.dumps(payload).encode(), {
+            "CF-Connecting-IP": source or ip,
+            "Authorization": "Bearer " + "a" * 64,
+            "Content-Type": "application/json",
+        })
+
+    def current(self, cookie):
         status, _, body = self.request("GET", "/api/v1/current", headers={
             "CF-Connecting-IP": "198.51.100.20",
             "Cookie": cookie,
         })
         self.assertEqual(status, 200)
-        data = json.loads(body)
-        self.assertEqual(data["ip"], "203.0.113.10")
-        self.assertEqual(data["client_ip"], "198.51.100.20")
+        return json.loads(body)
 
-    def test_update_source_mismatch_rejected(self):
-        payload = json.dumps({"ip": "203.0.113.11"}).encode()
+    def test_bad_host_rejected(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", "/", headers={"Host": "evil.example.com"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 421)
+        conn.close()
+
+    def test_legacy_update_defaults_to_wan2(self):
+        payload = json.dumps({"ip": "203.0.113.10"}).encode()
         status, _, _ = self.request("POST", "/api/v1/update", payload, {
-            "CF-Connecting-IP": "203.0.113.12",
+            "CF-Connecting-IP": "203.0.113.10",
             "Authorization": "Bearer " + "a" * 64,
             "Content-Type": "application/json",
         })
+        self.assertEqual(status, 204)
+        data = self.current(self.login_cookie())
+        self.assertEqual(data["ip"], "203.0.113.10")
+        self.assertEqual(data["interfaces"][0]["name"], "WAN2")
+        self.assertEqual(data["interfaces"][0]["last_report_status"], "success")
+
+    def test_multiple_interfaces_are_kept_separately(self):
+        self.assertEqual(self.post_update("WAN", "203.0.113.10", device="pppoe-WAN")[0], 204)
+        self.assertEqual(self.post_update("WAN2", "203.0.113.11", device="pppoe-WAN2")[0], 204)
+        data = self.current(self.login_cookie())
+        by_name = {x["name"]: x for x in data["interfaces"]}
+        self.assertEqual(by_name["WAN"]["ip"], "203.0.113.10")
+        self.assertEqual(by_name["WAN2"]["ip"], "203.0.113.11")
+        self.assertEqual(by_name["WAN2"]["device"], "pppoe-WAN2")
+
+    def test_unchanged_ip_keeps_change_time(self):
+        self.assertEqual(self.post_update("WAN2", "203.0.113.11")[0], 204)
+        first = self.current(self.login_cookie())
+        first_changed = first["interfaces"][0]["changed_at"]
+        time.sleep(1.1)
+        self.assertEqual(self.post_update("WAN2", "203.0.113.11")[0], 204)
+        second = self.current(self.login_cookie())
+        item = second["interfaces"][0]
+        self.assertEqual(item["changed_at"], first_changed)
+        self.assertGreater(item["last_report_at"], first_changed)
+
+    def test_source_mismatch_records_failure_without_replacing_ip(self):
+        self.assertEqual(self.post_update("WAN2", "203.0.113.11")[0], 204)
+        status, _, _ = self.post_update("WAN2", "203.0.113.12", source="203.0.113.13")
         self.assertEqual(status, 403)
+        data = self.current(self.login_cookie())
+        item = data["interfaces"][0]
+        self.assertEqual(item["ip"], "203.0.113.11")
+        self.assertEqual(item["last_report_status"], "failed")
+        self.assertEqual(item["last_report_error"], "source_mismatch")
+
+    def test_inventory_marks_missing_interface_inactive(self):
+        self.assertEqual(self.post_update("WAN", "203.0.113.10")[0], 204)
+        self.assertEqual(self.post_update("WAN2", "203.0.113.11")[0], 204)
+        payload = json.dumps({"interfaces": [{"name": "WAN2", "device": "pppoe-WAN2"}]}).encode()
+        status, _, _ = self.request("POST", "/api/v1/inventory", payload, {
+            "CF-Connecting-IP": "203.0.113.11",
+            "Authorization": "Bearer " + "a" * 64,
+            "Content-Type": "application/json",
+        })
+        self.assertEqual(status, 204)
+        data = self.current(self.login_cookie())
+        by_name = {x["name"]: x for x in data["interfaces"]}
+        self.assertFalse(by_name["WAN"]["active"])
+        self.assertTrue(by_name["WAN2"]["active"])
+
+    def test_v1_state_migrates_on_read(self):
+        ts = int(time.time()) - 10
+        (self.state / "current.json").write_text(
+            json.dumps({"ip": "203.0.113.40", "updated_at": ts}), encoding="utf-8",
+        )
+        data = self.current(self.login_cookie())
+        self.assertEqual(data["schema"], 2)
+        self.assertEqual(data["interfaces"][0]["name"], "WAN2")
+        self.assertEqual(data["interfaces"][0]["ip"], "203.0.113.40")
+        self.assertEqual(data["interfaces"][0]["changed_at"], ts)
 
     def test_current_requires_login(self):
         status, _, _ = self.request("GET", "/api/v1/current")
