@@ -15,9 +15,18 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
 [ "$(id -u)" = "0" ] || fail "Run this installer as root."
-for cmd in ubus jsonfilter curl sed grep sort; do
+for cmd in ubus jsonfilter curl sed grep sort cp chmod mkdir; do
     command -v "$cmd" >/dev/null 2>&1 || fail "Missing required command: $cmd"
 done
+
+copy_mode() {
+    src="$1"
+    dst="$2"
+    mode="$3"
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+    chmod "$mode" "$dst"
+}
 
 printf '\nWeiG WAN Vault - OpenWrt installer\n\n'
 
@@ -117,10 +126,10 @@ EOF
 chmod 600 "$CONFIG_FILE"
 unset WRITE_TOKEN
 
-install -m 700 "$TMP_DIR/wan2-ipnotify.sh" "$REPORTER"
-install -m 700 "$TMP_DIR/wan2-vault" "$CLI"
+copy_mode "$TMP_DIR/wan2-ipnotify.sh" "$REPORTER" 700
+copy_mode "$TMP_DIR/wan2-vault" "$CLI" 700
 mkdir -p "$(dirname "$VERSION_FILE")" "$STATE_DIR/interfaces"
-install -m 644 "$TMP_DIR/VERSION" "$VERSION_FILE"
+copy_mode "$TMP_DIR/VERSION" "$VERSION_FILE" 644
 chmod 700 "$STATE_DIR" "$STATE_DIR/interfaces"
 
 mkdir -p /etc/crontabs
