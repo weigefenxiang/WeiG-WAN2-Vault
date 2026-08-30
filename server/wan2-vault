@@ -1,0 +1,96 @@
+#!/bin/bash
+set -euo pipefail
+
+RAW_BASE="${WAN2VAULT_RAW_BASE:-https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main}"
+APP="/usr/local/lib/wan2-vault/wan2-vault.py"
+VERSION_FILE="/usr/local/lib/wan2-vault/VERSION"
+SERVICE="/etc/systemd/system/wan2-vault.service"
+BACKUP_DIR="/var/lib/wan2-vault/backups"
+CONFIG="/etc/wan2-vault/config.json"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+[ "${EUID:-$(id -u)}" -eq 0 ] || fail "Run as root."
+
+version() {
+    cat "$VERSION_FILE" 2>/dev/null || echo "1.0.0"
+}
+
+status_cmd() {
+    echo "WeiG WAN Vault"
+    echo "Version: $(version)"
+    if [ -r "$CONFIG" ]; then
+        python3 - "$CONFIG" <<'PY'
+import json, sys
+obj=json.load(open(sys.argv[1], encoding="utf-8"))
+print("Hostname:", obj.get("public_hostname", "unknown"))
+print("Backend: ", f'{obj.get("bind_host","127.0.0.1")}:{obj.get("bind_port",29444)}')
+PY
+    fi
+    systemctl --no-pager --full status wan2-vault.service || true
+}
+
+upgrade_cmd() {
+    local tmp
+    tmp="$(mktemp)"
+    curl -fsSL "$RAW_BASE/server/update.sh" -o "$tmp"
+    bash "$tmp"
+    rm -f "$tmp"
+}
+
+check_update() {
+    remote="$(curl -fsSL "$RAW_BASE/VERSION" | sed -n '1p')"
+    local_v="$(version)"
+    echo "Installed: $local_v"
+    echo "Latest:    $remote"
+    [ "$local_v" = "$remote" ] || echo "Update available."
+}
+
+rollback_cmd() {
+    [ -d "$BACKUP_DIR" ] || fail "No backups are available."
+    latest="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-)"
+    [ -n "$latest" ] && [ -d "$latest" ] || fail "No backups are available."
+    echo "Rolling back from: $latest"
+    [ -f "$latest/wan2-vault.py" ] && install -o root -g root -m 0755 "$latest/wan2-vault.py" "$APP"
+    [ -f "$latest/wan2-vault.service" ] && install -o root -g root -m 0644 "$latest/wan2-vault.service" "$SERVICE"
+    [ -f "$latest/wan2-vault-cli" ] && install -o root -g root -m 0755 "$latest/wan2-vault-cli" /usr/local/sbin/wan2-vault
+    [ -f "$latest/VERSION" ] && install -o root -g root -m 0644 "$latest/VERSION" "$VERSION_FILE"
+    if [ -f "$latest/current.json" ]; then
+        install -o wan2vault -g wan2vault -m 0600 "$latest/current.json" /var/lib/wan2-vault/current.json
+    fi
+    python3 -m py_compile "$APP"
+    systemctl daemon-reload
+    systemctl restart wan2-vault.service
+    systemctl is-active --quiet wan2-vault.service || fail "Rollback service restart failed."
+    echo "Rollback complete. Version: $(version)"
+}
+
+manage_cmd() {
+    local tmp
+    tmp="$(mktemp)"
+    curl -fsSL "$RAW_BASE/server/manage.sh" -o "$tmp"
+    bash "$tmp"
+    rm -f "$tmp"
+}
+
+case "${1:-status}" in
+    status) status_cmd ;;
+    version) version ;;
+    check-update) check_update ;;
+    upgrade) upgrade_cmd ;;
+    rollback) rollback_cmd ;;
+    manage) manage_cmd ;;
+    *)
+        cat <<'EOF'
+Usage: wan2-vault <command>
+
+Commands:
+  status        Show service and configuration status
+  version       Show installed version
+  check-update  Compare installed version with GitHub
+  upgrade       One-command upgrade with automatic rollback on failure
+  rollback      Restore the latest pre-upgrade backup
+  manage        Change login credentials, token, or sessions
+EOF
+        exit 1
+        ;;
+esac
