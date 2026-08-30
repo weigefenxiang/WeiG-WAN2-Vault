@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python3 -m py_compile server/wan2-vault.py
+      - name: Server tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Shell syntax
+        run: |
+          bash -n server/install.sh
+          bash -n server/install-cloudflared.sh
+          bash -n server/update.sh
+          bash -n server/manage.sh
+          bash -n server/uninstall.sh
+          sh -n openwrt/install.sh
+          sh -n openwrt/uninstall.sh
+          sh -n openwrt/wan2-ipnotify.sh
+          sh -n openwrt/95-wan2-ipnotify
