@@ -148,6 +148,21 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(by_name["WAN2"]["ip"], "203.0.113.11")
         self.assertEqual(by_name["WAN2"]["device"], "pppoe-WAN2")
 
+    def test_private_wan_is_accepted_and_public_wan_sorts_first(self):
+        self.assertEqual(self.post_update(
+            "WAN", "172.20.10.2", source="198.51.100.20", device="pppoe-WAN"
+        )[0], 204)
+        self.assertEqual(self.post_update(
+            "WAN2", "203.0.113.11", source="203.0.113.11", device="pppoe-WAN2"
+        )[0], 204)
+        data = self.current(self.login_cookie())
+        self.assertEqual([x["name"] for x in data["interfaces"][:2]], ["WAN2", "WAN"])
+        by_name = {x["name"]: x for x in data["interfaces"]}
+        self.assertEqual(by_name["WAN2"]["address_type"], "public")
+        self.assertEqual(by_name["WAN"]["address_type"], "private")
+        self.assertEqual(by_name["WAN"]["last_report_status"], "success")
+        self.assertEqual(by_name["WAN"]["verification"], "token_private")
+
     def test_unchanged_ip_keeps_change_time(self):
         self.assertEqual(self.post_update("WAN2", "203.0.113.11")[0], 204)
         first = self.current(self.login_cookie())
