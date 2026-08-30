@@ -23,8 +23,12 @@ restore_backup() {
     echo "Restoring previous version..." >&2
     [ -f "$BACKUP/wan2-vault.py" ] && install -o root -g root -m 0755 "$BACKUP/wan2-vault.py" "$APP"
     [ -f "$BACKUP/wan2-vault.service" ] && install -o root -g root -m 0644 "$BACKUP/wan2-vault.service" "$SERVICE"
-    [ -f "$BACKUP/wan2-vault-cli" ] && install -o root -g root -m 0755 "$BACKUP/wan2-vault-cli" "$CLI" || true
-    [ -f "$BACKUP/VERSION" ] && install -o root -g root -m 0644 "$BACKUP/VERSION" "$VERSION_FILE" || true
+    if [ -f "$BACKUP/wan2-vault-cli" ]; then
+        install -o root -g root -m 0755 "$BACKUP/wan2-vault-cli" "$CLI"
+    else
+        rm -f "$CLI"
+    fi
+    [ -f "$BACKUP/VERSION" ] && install -o root -g root -m 0644 "$BACKUP/VERSION" "$VERSION_FILE"
     if [ -f "$BACKUP/current.json" ]; then
         install -o wan2vault -g wan2vault -m 0600 "$BACKUP/current.json" "$CURRENT_FILE"
     fi
@@ -64,7 +68,8 @@ install -d -o root -g root -m 0700 "$BACKUP"
 [ -f "$APP" ] && cp -a "$APP" "$BACKUP/wan2-vault.py"
 [ -f "$SERVICE" ] && cp -a "$SERVICE" "$BACKUP/wan2-vault.service"
 [ -f "$CLI" ] && cp -a "$CLI" "$BACKUP/wan2-vault-cli"
-[ -f "$VERSION_FILE" ] && cp -a "$VERSION_FILE" "$BACKUP/VERSION"
+printf '%s\n' "$LOCAL_VERSION" > "$BACKUP/VERSION"
+chmod 0600 "$BACKUP/VERSION"
 [ -f "$CURRENT_FILE" ] && cp -a "$CURRENT_FILE" "$BACKUP/current.json"
 
 install -o root -g root -m 0755 "$TMP_DIR/wan2-vault.py" "$APP"
