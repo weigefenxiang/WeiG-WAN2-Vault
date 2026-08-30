@@ -1,5 +1,5 @@
 [Unit]
-Description=WeiG WAN2 Vault
+Description=WeiG WAN Vault
 After=network.target
 
 [Service]
