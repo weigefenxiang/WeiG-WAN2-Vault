@@ -9,6 +9,7 @@ VERSION_FILE="/usr/local/lib/wan2-vault/VERSION"
 CONFIG_FILE="/etc/wan2-vault/config.json"
 CURRENT_FILE="/var/lib/wan2-vault/current.json"
 BACKUP_ROOT="/var/lib/wan2-vault/backups"
+CACHE_BUST="${WAN2VAULT_CACHE_BUST:-$(date +%s)}"
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || { echo "ERROR: run as root" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required" >&2; exit 1; }
@@ -17,6 +18,12 @@ command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required" >&2; exit 1;
 TMP_DIR="$(mktemp -d)"
 SUCCESS=0
 BACKUP=""
+
+fetch_raw() {
+    local rel="$1" out="$2" sep="?"
+    [[ "$RAW_BASE" == *\?* ]] && sep="&"
+    curl -fsSL -H 'Cache-Control: no-cache' "${RAW_BASE}/${rel}${sep}_=${CACHE_BUST}" -o "$out"
+}
 
 restore_backup() {
     [ -n "$BACKUP" ] && [ -d "$BACKUP" ] || return 0
@@ -46,10 +53,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-curl -fsSL "$RAW_BASE/server/wan2-vault.py" -o "$TMP_DIR/wan2-vault.py"
-curl -fsSL "$RAW_BASE/server/wan2-vault.service" -o "$TMP_DIR/wan2-vault.service"
-curl -fsSL "$RAW_BASE/server/wan2-vault" -o "$TMP_DIR/wan2-vault-cli"
-curl -fsSL "$RAW_BASE/VERSION" -o "$TMP_DIR/VERSION"
+fetch_raw "server/wan2-vault.py" "$TMP_DIR/wan2-vault.py"
+fetch_raw "server/wan2-vault.service" "$TMP_DIR/wan2-vault.service"
+fetch_raw "server/wan2-vault" "$TMP_DIR/wan2-vault-cli"
+fetch_raw "VERSION" "$TMP_DIR/VERSION"
 
 python3 -m py_compile "$TMP_DIR/wan2-vault.py"
 bash -n "$TMP_DIR/wan2-vault-cli"
