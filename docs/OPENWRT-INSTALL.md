@@ -8,6 +8,8 @@ jsonfilter
 curl
 ```
 
+The OpenWrt scripts use BusyBox-compatible `cp`, `mkdir`, `chmod`, `mv`, `sed`, and `grep`; they do not require the separate `install` command from coreutils.
+
 ## Install
 
 ```sh
@@ -73,7 +75,7 @@ wan2-vault upgrade
 
 `wan2-vault report` forces all currently selected WANs plus the inventory to be sent.
 
-## v1.0 upgrade
+## Upgrade from older OpenWrt layouts
 
 ```sh
 wget -O /tmp/wan2-vault-update.sh \
@@ -81,7 +83,33 @@ wget -O /tmp/wan2-vault-update.sh \
 sh /tmp/wan2-vault-update.sh
 ```
 
-For safety, a v1.0 `WAN_INTERFACE='WAN2'` configuration is migrated to manual tracking of WAN2 rather than suddenly uploading all other WAN interfaces.
+The updater supports both repository v1 installations and the earlier manual layout used before the repository installer existed.
+
+Repository v1 may contain:
+
+```text
+/etc/wan2-vault.conf
+WAN_INTERFACE='WAN2'
+```
+
+The earlier manual layout may contain:
+
+```text
+/etc/wan2-vault.token
+/etc/wan2-vault.last-ip
+/usr/bin/wan2-vault-report
+/etc/hotplug.d/iface/95-wan2-vault
+/etc/init.d/wan2-vault-report
+```
+
+For the manual layout, the updater reads the existing hostname/interface from the reporter and migrates the existing token without printing it. The new configuration is written to:
+
+```text
+/etc/wan2-vault.conf
+/etc/wan2-vault-state/
+```
+
+For safety, an old single-WAN installation is migrated to manual tracking of the same interface instead of suddenly uploading every WAN. Obsolete hotplug/init/token files are removed only after the new layout is installed; if the updater fails, its backup/rollback path restores the previous files.
 
 After verifying the upgrade:
 
