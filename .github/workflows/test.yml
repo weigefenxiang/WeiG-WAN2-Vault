@@ -23,7 +23,9 @@ jobs:
           bash -n server/update.sh
           bash -n server/manage.sh
           bash -n server/uninstall.sh
+          bash -n server/wan2-vault
           sh -n openwrt/install.sh
+          sh -n openwrt/update.sh
           sh -n openwrt/uninstall.sh
           sh -n openwrt/wan2-ipnotify.sh
-          sh -n openwrt/95-wan2-ipnotify
+          sh -n openwrt/wan2-vault
