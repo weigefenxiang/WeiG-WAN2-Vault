@@ -1,62 +1,68 @@
 # WeiG-WAN2-Vault
 
-一个面向 OpenWrt 动态公网 IPv4 场景的轻量私有 IP 信箱。
+一个面向 OpenWrt 多 WAN 动态公网 IPv4 场景的轻量私有 IP Vault。
 
-它让 OpenWrt **主动**通过 HTTPS 把指定 WAN 接口的当前公网 IPv4 上报到 Cloudflare，再通过 Cloudflare Tunnel 转发到 VPS 上仅监听 `127.0.0.1` 的服务。浏览器访问自己的域名后，用用户名和密码登录即可查看当前 WAN IPv4。
+OpenWrt 每 5 分钟只在本机检查 WAN 状态。**IPv4 或出口设备没有变化时不会向 Cloudflare/VPS 发请求**；发生变化时，每个 WAN 都通过自己的 `l3_device` 单独上报，因此服务端仍能校验：
 
-> 仓库本身不需要，也不应该保存你的真实域名、用户名、密码、Tunnel Token、WRITE_TOKEN、VPS IP 或家庭 WAN IP。文档统一使用 `notify.example.com`。
+```text
+posted IPv4 == CF-Connecting-IP
+```
 
-## 设计目标
+网页登录后可以查看全部 WAN，也可以在下拉框中只显示某一个 WAN。页面显示精确的最后 IP 变化时间、最后上报时间、最近上报结果和页面刷新时间。
 
-- OpenWrt 不新增 HTTP/HTTPS 入站服务。
-- 不把家庭公网 IP 写进公开 DNS。
-- VPS 后端只监听 `127.0.0.1:29444`。
-- 使用 Cloudflare Tunnel，不要求为 Vault 新开 VPS 公网端口。
-- Vault 不需要 Origin 证书、Certbot 或 acme.sh。
-- OpenWrt 更新接口使用独立 WRITE_TOKEN，与网页登录密码隔离。
-- OpenWrt 上报的 IPv4 必须与 Cloudflare 看到的 `CF-Connecting-IP` 一致。
-- 只保存当前 WAN IPv4 和最后更新时间，不维护历史 IP 列表。
-- 浏览器中的 WAN IP 响应使用 `Cache-Control: no-store`，不会缓存旧地址。
-- “保持登录”采用长期 Session + 滑动续期；浏览器清除站点数据、主动退出或长时间不访问时仍可能要求重新登录。
+> 仓库本身不保存你的真实域名、用户名、密码、WRITE_TOKEN、VPS IP 或家庭 WAN IP。文档统一使用 `notify.example.com`。
+
+## v1.1.0 highlights
+
+- Multi-WAN：自动发现所有处于 `up`、有 IPv4、且拥有 IPv4 默认路由的 OpenWrt 接口。
+- Manual mode：也可以只跟踪指定接口，例如 `WAN WAN2`。
+- 每 5 分钟本地检查；状态不变时零上报。
+- 每个 WAN 独立通过自己的 `l3_device` 上报，保留 Cloudflare 来源 IP 校验。
+- 网页支持 `All WANs` / 单 WAN 选择，选择结果只保存在浏览器 `localStorage`。
+- 显示 `Last IP change`、`Last report`、`Last report status`、`Page refreshed`。
+- 接口消失后通过 inventory 同步为 `Inactive`，历史最后 IP 仍保留供排错。
+- 服务端自动兼容并迁移 v1.0 单 WAN `current.json`。
+- VPS 和 OpenWrt 都提供 `wan2-vault upgrade` 一键升级。
+- VPS 升级前自动备份应用、service、版本和当前状态；失败自动回滚。
+- OpenWrt v1.0 升级时保留原单 WAN 选择；需要多 WAN 时执行 `wan2-vault interfaces auto`。
 
 ## 架构
 
 ```text
-OpenWrt WAN2
-    |
-    | outbound HTTPS only
-    v
-Cloudflare Edge
-    |
-    | Cloudflare Tunnel
-    v
-VPS cloudflared
-    |
-    v
-127.0.0.1:29444
-WeiG-WAN2-Vault
+OpenWrt
+  ├─ WAN  ── curl --interface <WAN l3_device>  ─┐
+  ├─ WAN2 ── curl --interface <WAN2 l3_device> ─┼─> Cloudflare ─> VPS
+  └─ WAN3 ── curl --interface <WAN3 l3_device> ─┘
+
+VPS
+  └─ 127.0.0.1:29444
+      └─ WeiG WAN Vault
 
 Browser
-    |
-    v
-https://notify.example.com
-    |
-    +-- username/password login
-    +-- persistent session
-    +-- current WAN IPv4
+  └─ https://notify.example.com
+      ├─ login
+      ├─ All WANs / selected WAN
+      ├─ last IP change
+      ├─ last report status/time
+      └─ page refreshed time
 ```
 
-这个项目不会在家庭 WAN 上监听 `80/443`。OpenWrt 的上报连接形态是：
+服务端始终只监听 loopback：
 
 ```text
-WAN_PUBLIC_IP:ephemeral-port -> Cloudflare:443
+127.0.0.1:29444
 ```
 
-这是客户端主动出站连接，不是公网 HTTP Server。
+公网入口有两种受支持方式：
+
+1. **Cloudflare Tunnel**：Cloudflare Tunnel -> `http://127.0.0.1:29444`
+2. **Cloudflare Proxy + Nginx**：Cloudflare -> VPS `443` -> Nginx/reverse proxy -> `http://127.0.0.1:29444`
+
+两种方式都必须让后端收到 Cloudflare 设置的 `CF-Connecting-IP`。
 
 ## 1. VPS 安装
 
-要求：Debian/Ubuntu + systemd + Python 3。
+Debian/Ubuntu + systemd + Python 3：
 
 ```bash
 curl -fsSLo /tmp/wan2-vault-install.sh \
@@ -73,33 +79,38 @@ Login username: ...
 Login password: ********
 ```
 
-密码不回显，也不以明文保存。程序只保存 scrypt 密码哈希。
+安装结束会生成随机 `WRITE_TOKEN`。它只用于 OpenWrt 上报，不要提交到 GitHub、Issue 或聊天记录。
 
-安装结束会生成一个随机 `WRITE_TOKEN`。它只用于 OpenWrt 上报，**不要提交到 GitHub、Issue、聊天记录或公开配置中**。
-
-验证 VPS 后端：
+验证：
 
 ```bash
 ss -lntp | grep 29444
 ```
 
-正确结果必须只监听：
+必须只监听：
 
 ```text
 127.0.0.1:29444
 ```
 
-不能是：
+管理：
 
-```text
-0.0.0.0:29444
+```bash
+sudo wan2-vault status
+sudo wan2-vault version
+sudo wan2-vault check-update
+sudo wan2-vault upgrade
+sudo wan2-vault rollback
+sudo wan2-vault manage
 ```
 
-详细说明见 [`docs/VPS-INSTALL.md`](docs/VPS-INSTALL.md)。
+详见 [`docs/VPS-INSTALL.md`](docs/VPS-INSTALL.md)。
 
-## 2. 安装 cloudflared
+## 2. Cloudflare 入口
 
-可以使用仓库中的辅助脚本：
+### 方案 A：Cloudflare Tunnel
+
+仓库保留辅助安装脚本：
 
 ```bash
 curl -fsSLo /tmp/install-cloudflared.sh \
@@ -108,16 +119,6 @@ curl -fsSLo /tmp/install-cloudflared.sh \
 sudo bash /tmp/install-cloudflared.sh
 ```
 
-然后在 Cloudflare Zero Trust / Tunnels 中创建 remotely-managed Tunnel。
-
-Cloudflare 会给出类似下面的命令：
-
-```bash
-sudo cloudflared service install <TUNNEL_TOKEN>
-```
-
-`TUNNEL_TOKEN` 是秘密，不要写进仓库。
-
 Published application：
 
 ```text
@@ -125,13 +126,27 @@ Hostname: notify.example.com
 Service:  http://127.0.0.1:29444
 ```
 
-不要再为这个 hostname 创建指向家庭 WAN IP 的 A/AAAA 记录。
-
 详见 [`docs/CLOUDFLARE-TUNNEL.md`](docs/CLOUDFLARE-TUNNEL.md)。
+
+### 方案 B：Cloudflare Proxy + Nginx
+
+适合 VPS 已经使用 Nginx `stream` / SNI 分流的场景。典型链路：
+
+```text
+Cloudflare HTTPS
+    -> VPS :443
+    -> nginx stream ssl_preread
+    -> local TLS virtual host
+    -> http://127.0.0.1:29444
+```
+
+Origin 侧建议使用 Cloudflare Origin CA + `Full (strict)`。
+
+详见 [`docs/CLOUDFLARE-PROXY.md`](docs/CLOUDFLARE-PROXY.md)。
 
 ## 3. OpenWrt 安装
 
-要求 OpenWrt 已有：
+要求：
 
 ```text
 ubus
@@ -148,86 +163,114 @@ wget -O /tmp/wan2-vault-install.sh \
 sh /tmp/wan2-vault-install.sh
 ```
 
-安装程序会询问：
+安装器会列出当前检测到的 WAN 候选，然后选择：
 
 ```text
-Public hostname: notify.example.com
-WAN interface [WAN2]:
-WRITE_TOKEN: ********
+1) Auto   - 自动跟踪所有 IPv4 默认路由 WAN
+2) Manual - 只跟踪指定接口
 ```
 
-`WRITE_TOKEN` 输入时不回显。
+新安装推荐 `Auto`。
 
-安装后会创建：
-
-```text
-/etc/wan2-vault.conf
-/etc/wan2-ipnotify.sh
-/etc/hotplug.d/iface/95-wan2-ipnotify
-```
-
-并安装周期检查：
-
-```text
-*/10 * * * * /etc/wan2-ipnotify.sh
-```
-
-脚本不会每 10 分钟无条件上报。默认在以下情况才 POST：
-
-- WAN IPv4 发生变化；
-- 上一次成功上报距今超过 30 分钟；
-- 手动使用 `FORCE=1` 强制刷新。
-
-第一次测试：
+安装后：
 
 ```sh
-FORCE=1 /etc/wan2-ipnotify.sh
-logread | grep wan2-vault | tail
+wan2-vault status
+wan2-vault interfaces
+wan2-vault report
+wan2-vault upgrade
 ```
+
+切换为所有 WAN：
+
+```sh
+wan2-vault interfaces auto
+```
+
+只跟踪 WAN/WAN2：
+
+```sh
+wan2-vault interfaces set WAN WAN2
+```
+
+周期任务：
+
+```text
+*/5 * * * * /usr/bin/wan2-vault-report
+```
+
+这并不意味着每 5 分钟发请求。脚本先比较持久化本地状态：
+
+```text
+/etc/wan2-vault-state/
+```
+
+只有以下变化才需要网络请求：
+
+- WAN 首次出现；
+- WAN IPv4 改变；
+- `l3_device` 改变；
+- WAN 接口集合发生变化（inventory 同步）。
 
 详见 [`docs/OPENWRT-INSTALL.md`](docs/OPENWRT-INSTALL.md)。
 
-## 4. 浏览器使用
+## 4. 多 WAN 上报安全模型
 
-打开：
-
-```text
-https://notify.example.com
-```
-
-第一次输入用户名、密码，并保持勾选：
+假设：
 
 ```text
-Keep me signed in until I log out
+WAN  = 1.1.1.1
+WAN2 = 2.2.2.2
 ```
 
-之后浏览器会保存一个 `Secure + HttpOnly + SameSite=Strict` 的长期 Session Cookie。服务会进行滑动续期，因此正常持续使用时基本等同于“保持登录直到主动退出”。
-
-注意：浏览器可能限制持久 Cookie 的最长寿命，也可能因用户清理站点数据、隐私策略或长时间不访问而删除 Cookie。因此 Web 应用无法保证数学意义上的“永久不掉登录”。
-
-WAN IPv4 本身不会被浏览器缓存，页面会周期读取最新状态。
-
-## 5. 安全边界
-
-家庭 OpenWrt：
+客户端不会把两个 IP 放进一次更新请求，而是分别：
 
 ```text
-WAN:80            no service added
-WAN:443           no service added
-WAN HTTP API      none
-WAN HTTPS API     none
-IP reporting      outbound HTTPS only
+WAN:
+curl --interface pppoe-WAN
+POST {"interface":"WAN","device":"pppoe-WAN","ip":"1.1.1.1"}
+
+WAN2:
+curl --interface pppoe-WAN2
+POST {"interface":"WAN2","device":"pppoe-WAN2","ip":"2.2.2.2"}
 ```
 
-运营商仍然天然知道它给你分配的公网 IP，也可能观察到你的线路连接 Cloudflare 的网络元数据。本项目解决的是：**不因为动态 IP 上报而在家庭 WAN 上增加一个可扫描的 HTTP/HTTPS 服务，也不通过公开 DNS 直接公布住宅 WAN IP。**
+服务端分别验证请求携带的 IPv4 与 Cloudflare 实际看到的 IPv4 一致。这样支持 Multi-WAN 时不会降低 v1.0 的来源校验。
 
-Cloudflare 作为代理方会处理客户端 IP 和请求元数据。不要把“不保存 IP 历史”等同于“Cloudflare 看不到任何网络元数据”。
+`/api/v1/inventory` 只负责同步接口名称/设备/Active 状态，不替代 IP 来源校验。
 
-更多内容见 [`SECURITY.md`](SECURITY.md) 和 [`docs/SECURITY-MODEL.md`](docs/SECURITY-MODEL.md)。
+## 5. 网页状态
 
-## 6. 更新
+登录后默认显示全部 WAN：
 
-VPS：
+```text
+WAN
+  IPv4               ...
+  Device              ...
+  Last report status  Success
+  Last IP change      2026-08-30 18:20:00 · 24m ago
+  Last report         2026-08-30 18:20:00 · 24m ago
+
+WAN2
+  ...
+
+Page refreshed        2026-08-30 18:44:15
+Current client IP     ...
+```
+
+顶部下拉框可以选择某一个 WAN。这个选择只保存在当前浏览器，不会改变 OpenWrt 上传哪些接口。
+
+`Last IP change` 不会因为页面每 15 秒读取状态而改变，也不会因为 OpenWrt 每 5 分钟本地检查而改变。
+
+## 6. 一键升级
+
+### VPS
+
+```bash
+sudo wan2-vault upgrade
+```
+
+也可以继续使用独立更新脚本：
 
 ```bash
 curl -fsSLo /tmp/wan2-vault-update.sh \
@@ -235,9 +278,65 @@ curl -fsSLo /tmp/wan2-vault-update.sh \
 sudo bash /tmp/wan2-vault-update.sh
 ```
 
-更新脚本不会覆盖 `/etc/wan2-vault` 或 `/var/lib/wan2-vault` 中的本地秘密和状态。
+升级不会覆盖：
 
-## 7. 卸载
+```text
+/etc/wan2-vault/
+/var/lib/wan2-vault/sessions.json
+```
+
+升级前会备份当前应用、systemd service、版本和 `current.json`。安装后执行 Python 语法检查、systemd 重启和 localhost health check；失败会自动恢复。
+
+手动回滚最近一次升级：
+
+```bash
+sudo wan2-vault rollback
+```
+
+### OpenWrt
+
+```sh
+wan2-vault upgrade
+```
+
+v1.0 的旧安装可以先运行新版 updater：
+
+```sh
+wget -O /tmp/wan2-vault-update.sh \
+  https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main/openwrt/update.sh
+
+sh /tmp/wan2-vault-update.sh
+```
+
+为了避免旧设备升级后突然开始上传额外 WAN，v1.0 的单 WAN 配置会迁移为 `manual`。确认后切换：
+
+```sh
+wan2-vault interfaces auto
+```
+
+## 7. v1.0 兼容
+
+旧客户端仍可发送：
+
+```json
+{"ip":"203.0.113.10"}
+```
+
+服务端会把它视为：
+
+```text
+interface = WAN2
+```
+
+旧状态：
+
+```json
+{"ip":"203.0.113.10","updated_at":1234567890}
+```
+
+读取时自动映射到 schema 2，不要求手工编辑状态文件。
+
+## 8. 卸载
 
 VPS：
 
@@ -255,18 +354,6 @@ wget -O /tmp/wan2-vault-uninstall.sh \
 sh /tmp/wan2-vault-uninstall.sh
 ```
 
-## 8. 本地管理
-
-在 VPS 上可以下载并运行管理脚本，用于修改登录密码、轮换 WRITE_TOKEN 或注销全部浏览器 Session：
-
-```bash
-curl -fsSLo /tmp/wan2-vault-manage.sh \
-  https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main/server/manage.sh
-sudo bash /tmp/wan2-vault-manage.sh
-```
-
-修改登录密码会自动注销现有浏览器 Session。轮换 WRITE_TOKEN 后，需要把新 Token 更新到 OpenWrt 的 `/etc/wan2-vault.conf`。
-
 ## 项目目录
 
 ```text
@@ -275,27 +362,24 @@ WeiG-WAN2-Vault/
 ├── SECURITY.md
 ├── LICENSE
 ├── VERSION
-├── .gitignore
 ├── server/
 │   ├── install.sh
 │   ├── install-cloudflared.sh
 │   ├── update.sh
 │   ├── manage.sh
 │   ├── uninstall.sh
+│   ├── wan2-vault
 │   ├── wan2-vault.py
 │   └── wan2-vault.service
 ├── openwrt/
 │   ├── install.sh
+│   ├── update.sh
 │   ├── uninstall.sh
-│   ├── wan2-ipnotify.sh
-│   └── 95-wan2-ipnotify
+│   ├── wan2-vault
+│   └── wan2-ipnotify.sh
 ├── docs/
 └── tests/
 ```
-
-## Version
-
-See [`VERSION`](VERSION).
 
 ## License
 
