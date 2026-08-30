@@ -1,0 +1,17 @@
+*.key
+*.pem
+*.crt
+*.token
+*.secret
+*.env
+*.pyc
+__pycache__/
+credentials
+config.local
+auth.json
+sessions.json
+secrets.json
+current.json
+secrets/
+runtime/
+.DS_Store
