@@ -29,3 +29,9 @@ jobs:
           sh -n openwrt/uninstall.sh
           sh -n openwrt/wan2-ipnotify.sh
           sh -n openwrt/wan2-vault
+      - name: OpenWrt BusyBox portability
+        run: |
+          if grep -nE '(^|[[:space:]])install[[:space:]]+-m([[:space:]]|$)' openwrt/*.sh openwrt/wan2-vault; then
+            echo 'OpenWrt scripts must not depend on the standalone install command.'
+            exit 1
+          fi
