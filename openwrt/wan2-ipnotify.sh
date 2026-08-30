@@ -18,14 +18,15 @@ INTERFACES="${INTERFACES:-${WAN_INTERFACE:-WAN2}}"
 case "$MODE" in auto|manual) ;; *) logger -t "$TAG" "Invalid MODE: $MODE"; exit 1 ;; esac
 
 mkdir "$LOCK_DIR" 2>/dev/null || exit 0
-trap 'rmdir "$LOCK_DIR" 2>/dev/null; rm -f "$CURRENT_FILE" "$FINGERPRINT_FILE" "$BODY_FILE"' EXIT INT TERM
 
 mkdir -p "$STATE_DIR/interfaces"
 chmod 700 "$STATE_DIR" "$STATE_DIR/interfaces" 2>/dev/null || true
 
 CURRENT_FILE="/tmp/wan2-vault.current.$$"
+SORTED_FILE="/tmp/wan2-vault.sorted.$$"
 FINGERPRINT_FILE="/tmp/wan2-vault.inventory.$$"
 BODY_FILE="/tmp/wan2-vault.response.$$"
+trap 'rmdir "$LOCK_DIR" 2>/dev/null; rm -f "$CURRENT_FILE" "$SORTED_FILE" "$FINGERPRINT_FILE" "$BODY_FILE"' EXIT INT TERM
 : > "$CURRENT_FILE"
 
 valid_name() {
@@ -36,15 +37,53 @@ valid_device() {
     case "$1" in *[!A-Za-z0-9_.:@+-]*) return 1 ;; *) return 0 ;; esac
 }
 
+# Only addresses that can plausibly equal CF-Connecting-IP are reportable.
+# RFC1918, CGNAT, link-local, loopback, documentation/benchmark and
+# multicast/reserved ranges are rejected locally so they never reach the VPS.
+is_public_ipv4() {
+    addr="$1"
+    old_ifs="$IFS"
+    IFS=.
+    set -- $addr
+    IFS="$old_ifs"
+
+    [ "$#" -eq 4 ] || return 1
+    for octet in "$@"; do
+        case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$octet" -le 255 ] 2>/dev/null || return 1
+    done
+
+    o1="$1"; o2="$2"; o3="$3"; o4="$4"
+
+    [ "$o1" -ne 0 ] || return 1
+    [ "$o1" -ne 10 ] || return 1
+    [ "$o1" -ne 127 ] || return 1
+    [ "$o1" -lt 224 ] || return 1
+
+    if [ "$o1" -eq 100 ] && [ "$o2" -ge 64 ] && [ "$o2" -le 127 ]; then return 1; fi
+    if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then return 1; fi
+    if [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then return 1; fi
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then return 1; fi
+
+    # IANA special-purpose/test ranges that cannot be the public source seen by Cloudflare.
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && { [ "$o3" -eq 0 ] || [ "$o3" -eq 2 ]; }; then return 1; fi
+    if [ "$o1" -eq 198 ] && { [ "$o2" -eq 18 ] || [ "$o2" -eq 19 ]; }; then return 1; fi
+    if [ "$o1" -eq 198 ] && [ "$o2" -eq 51 ] && [ "$o3" -eq 100 ]; then return 1; fi
+    if [ "$o1" -eq 203 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 113 ]; then return 1; fi
+
+    return 0
+}
+
 read_interface() {
     name="$1"
     valid_name "$name" || return 0
     status="$(ubus call "network.interface.${name}" status 2>/dev/null)" || return 0
-    up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)"
+    up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null | sed -n '1p')"
     [ "$up" = "true" ] || return 0
-    ip="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
-    dev="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+    ip="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | sed -n '1p')"
+    dev="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null | sed -n '1p')"
     [ -n "$ip" ] && [ -n "$dev" ] || return 0
+    is_public_ipv4 "$ip" || return 0
     valid_device "$dev" || return 0
     targets="$(printf '%s' "$status" | jsonfilter -e '@.route[*].target' 2>/dev/null)"
     printf '%s\n' "$targets" | grep -qx '0.0.0.0' || return 0
@@ -64,7 +103,10 @@ else
     done
 fi
 
-sort -u "$CURRENT_FILE" -o "$CURRENT_FILE"
+# Do not use in-place sort output here: option/operand handling differs across
+# BusyBox builds and can leak the sorted inventory to stdout.
+sort -u "$CURRENT_FILE" > "$SORTED_FILE"
+mv "$SORTED_FILE" "$CURRENT_FILE"
 
 if [ "${LIST_ONLY:-0}" = "1" ]; then
     cat "$CURRENT_FILE"
