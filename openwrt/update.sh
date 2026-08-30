@@ -33,24 +33,9 @@ if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ] && [ "${FORCE:-0}" != "1" ]; then
     exit 0
 fi
 
-# Preserve v1 configuration. If MODE is absent, keep the old single-interface choice.
-# shellcheck disable=SC1090
-. "$CONFIG_FILE"
-if [ -z "${MODE:-}" ]; then
-    OLD_IF="${WAN_INTERFACE:-WAN2}"
-    tmp_conf="$TMP_DIR/config"
-    umask 077
-    cat > "$tmp_conf" <<EOF
-HOSTNAME='$HOSTNAME'
-MODE='manual'
-INTERFACES='$OLD_IF'
-WRITE_TOKEN='$WRITE_TOKEN'
-EOF
-    install -m 600 "$tmp_conf" "$CONFIG_FILE"
-fi
-
 BACKUP="$TMP_DIR/backup"
 mkdir -p "$BACKUP"
+cp -a "$CONFIG_FILE" "$BACKUP/config"
 [ -f "$REPORTER" ] && cp -a "$REPORTER" "$BACKUP/reporter" || true
 [ -f "$OLD_REPORTER" ] && cp -a "$OLD_REPORTER" "$BACKUP/old-reporter" || true
 [ -f "$CLI" ] && cp -a "$CLI" "$BACKUP/cli" || true
@@ -59,12 +44,15 @@ mkdir -p "$BACKUP"
 
 rollback() {
     echo "Update failed; restoring previous OpenWrt files." >&2
+    cp -a "$BACKUP/config" "$CONFIG_FILE"
     [ -f "$BACKUP/reporter" ] && cp -a "$BACKUP/reporter" "$REPORTER" || rm -f "$REPORTER"
     [ -f "$BACKUP/old-reporter" ] && cp -a "$BACKUP/old-reporter" "$OLD_REPORTER" || true
     [ -f "$BACKUP/cli" ] && cp -a "$BACKUP/cli" "$CLI" || rm -f "$CLI"
     if [ -f "$BACKUP/VERSION" ]; then
         mkdir -p "$(dirname "$VERSION_FILE")"
         cp -a "$BACKUP/VERSION" "$VERSION_FILE"
+    else
+        rm -f "$VERSION_FILE"
     fi
     [ -f "$BACKUP/cron" ] && cp -a "$BACKUP/cron" "$CRON_FILE" || true
     /etc/init.d/cron restart >/dev/null 2>&1 || true
@@ -80,6 +68,22 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT INT TERM
+
+# Preserve v1 configuration. If MODE is absent, keep the old single-interface choice.
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
+if [ -z "${MODE:-}" ]; then
+    OLD_IF="${WAN_INTERFACE:-WAN2}"
+    tmp_conf="$TMP_DIR/config.new"
+    umask 077
+    cat > "$tmp_conf" <<EOF
+HOSTNAME='$HOSTNAME'
+MODE='manual'
+INTERFACES='$OLD_IF'
+WRITE_TOKEN='$WRITE_TOKEN'
+EOF
+    install -m 600 "$tmp_conf" "$CONFIG_FILE"
+fi
 
 install -m 700 "$TMP_DIR/reporter" "$REPORTER"
 install -m 700 "$TMP_DIR/cli" "$CLI"
