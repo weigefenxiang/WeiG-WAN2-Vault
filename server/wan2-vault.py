@@ -39,6 +39,12 @@ MAX_BODY = 16384
 MAX_INTERFACES = 64
 NAME_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
 DEVICE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{0,128}$")
+PRIVATE_WAN_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+)
 
 STORE_LOCK = threading.RLock()
 LOGIN_LOCK = threading.RLock()
@@ -126,7 +132,8 @@ APP_JS = r"""
     h2.textContent = item.name;
     const badge = document.createElement('span');
     badge.className = 'badge';
-    badge.textContent = item.active ? 'Active' : 'Inactive';
+    const typeShort = item.address_type === 'private' ? 'Private' : 'Public';
+    badge.textContent = `${item.active ? 'Active' : 'Inactive'} · ${typeShort}`;
     title.append(h2, badge);
     card.append(title);
 
@@ -147,6 +154,7 @@ APP_JS = r"""
     });
     ipRow.row.append(copy);
 
+    addRow(card, 'Address type', item.address_type === 'private' ? 'Private / 私网' : 'Public / 公网', 'status');
     addRow(card, 'Device', item.device || 'Unknown', 'value');
     addRow(card, 'Last report status',
       item.last_report_status === 'failed'
@@ -176,7 +184,7 @@ APP_JS = r"""
       for (const item of items) {
         const option = document.createElement('option');
         option.value = item.name;
-        option.textContent = item.name;
+        option.textContent = `${item.name} · ${item.address_type === 'private' ? 'Private' : 'Public'}`;
         selector.append(option);
       }
     }
@@ -312,6 +320,18 @@ def _human_age(seconds: int) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def _is_private_wan_ipv4(value: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return addr.version == 4 and any(addr in network for network in PRIVATE_WAN_V4)
+
+
+def _address_type(value: str | None) -> str:
+    return "private" if value and _is_private_wan_ipv4(value) else "public"
+
+
 def _empty_current() -> dict:
     return {"schema": 2, "interfaces": {}, "last_inventory_at": 0}
 
@@ -339,6 +359,8 @@ def _normalize_current(obj: dict) -> dict:
                 "last_report_at": int(raw_record.get("last_report_at", 0) or 0),
                 "last_report_status": str(raw_record.get("last_report_status", "") or ""),
                 "last_report_error": str(raw_record.get("last_report_error", "") or ""),
+                "source_ip": _safe_client_ip(str(raw_record.get("source_ip", ""))) if raw_record.get("source_ip") else None,
+                "verification": str(raw_record.get("verification", "") or ""),
             }
         return state
 
@@ -354,6 +376,8 @@ def _normalize_current(obj: dict) -> dict:
             "last_report_at": ts,
             "last_report_status": "success" if ts else "",
             "last_report_error": "",
+            "source_ip": ip,
+            "verification": "source_match" if ts else "",
         }
         return state
     return _empty_current()
@@ -371,9 +395,12 @@ def _public_current(state: dict, now: int, client_ip: str | None) -> dict:
     for name, rec in state["interfaces"].items():
         changed_at = int(rec.get("changed_at", 0) or 0)
         report_at = int(rec.get("last_report_at", 0) or 0)
+        ip = rec.get("ip")
+        address_type = _address_type(ip)
         items.append({
             "name": name,
-            "ip": rec.get("ip"),
+            "ip": ip,
+            "address_type": address_type,
             "device": rec.get("device") or "",
             "active": bool(rec.get("active", False)),
             "changed_at": changed_at or None,
@@ -382,8 +409,10 @@ def _public_current(state: dict, now: int, client_ip: str | None) -> dict:
             "last_report_human": _human_age(max(0, now - report_at)) if report_at else "Never",
             "last_report_status": rec.get("last_report_status") or "",
             "last_report_error": rec.get("last_report_error") or "",
+            "source_ip": rec.get("source_ip"),
+            "verification": rec.get("verification") or "",
         })
-    items.sort(key=lambda x: (not x["active"], x["name"].casefold()))
+    items.sort(key=lambda x: (not x["active"], x["address_type"] != "public", x["name"].casefold()))
     primary = next((x for x in items if x["name"].casefold() == "wan2"), None)
     if primary is None:
         primary = next((x for x in items if x["active"]), items[0] if items else None)
@@ -411,6 +440,8 @@ def _record_failed_attempt(name: str, error: str) -> None:
             "last_report_at": 0,
             "last_report_status": "",
             "last_report_error": "",
+            "source_ip": None,
+            "verification": "",
         })
         rec["last_report_at"] = now
         rec["last_report_status"] = "failed"
@@ -573,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
 <body><main class="card"><h1>Private Vault</h1><p class="sub">Sign in to continue</p>{error_html}
 <form method="post" action="/login" autocomplete="on">
 <div class="field"><label for="username">Username</label><input id="username" name="username" type="text" autocomplete="username" required maxlength="128"></div>
-<div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="512"></div>
+<div class="field"><label for="password" >Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="512"></div>
 <label class="remember"><input type="checkbox" name="remember" value="1" checked> Keep me signed in until I log out</label>
 <button class="wide" type="submit">Sign in</button></form></main></body></html>""".encode("utf-8")
 
@@ -588,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class="row"><div><div class="label">Current client IP</div><div id="client-ip" class="value">Loading…</div></div></div>
 </div>
 <div class="actions"><form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="ghost" type="submit">Log out</button></form></div>
-<p class="small">WAN IP responses are never browser-cached. Display selection is stored only in this browser.</p></main><script src="/assets/app.js" defer></script></body></html>""".encode("utf-8")
+<p class="small">Public WANs are source-IP verified. Private/CGNAT WANs are token-authenticated and marked Private. WAN IP responses are never browser-cached.</p></main><script src="/assets/app.js" defer></script></body></html>""".encode("utf-8")
 
     def do_GET(self) -> None:
         self._pending_cookie = None
@@ -717,7 +748,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 _record_failed_attempt(name, "invalid_source")
                 return self._json(403, {"error": "invalid_source"})
-            if not hmac.compare_digest(posted, edge_ip):
+
+            private_wan = _is_private_wan_ipv4(posted)
+            if not private_wan and not hmac.compare_digest(posted, edge_ip):
                 _record_failed_attempt(name, "source_mismatch")
                 return self._json(403, {"error": "source_mismatch"})
 
@@ -737,6 +770,8 @@ class Handler(BaseHTTPRequestHandler):
                     "last_report_at": now,
                     "last_report_status": "success",
                     "last_report_error": "",
+                    "source_ip": edge_ip,
+                    "verification": "token_private" if private_wan else "source_match",
                 }
                 _atomic_write_json(CURRENT_FILE, state)
             self.send_response(204)
@@ -784,6 +819,8 @@ class Handler(BaseHTTPRequestHandler):
                         "last_report_at": 0,
                         "last_report_status": "",
                         "last_report_error": "",
+                        "source_ip": None,
+                        "verification": "",
                     })
                     rec["active"] = True
                     if device:
