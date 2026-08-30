@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WeiG-WAN2-Vault: localhost-only WAN IPv4 vault for Cloudflare Tunnel."""
+"""WeiG-WAN2-Vault: localhost-only multi-WAN IPv4 vault."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import html
 import ipaddress
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -34,7 +35,10 @@ SLIDING_RENEW_AFTER = 24 * 60 * 60
 LOGIN_WINDOW = 10 * 60
 LOGIN_MAX_FAILURES = 5
 LOGIN_BLOCK_SECONDS = 10 * 60
-MAX_BODY = 4096
+MAX_BODY = 16384
+MAX_INTERFACES = 64
+NAME_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
+DEVICE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{0,128}$")
 
 STORE_LOCK = threading.RLock()
 LOGIN_LOCK = threading.RLock()
@@ -70,44 +74,145 @@ if len(SESSION_SECRET) < 32:
 
 STYLE_CSS = r"""
 :root{color-scheme:light dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f7;color:#171717}
-.card{width:min(92vw,480px);background:#fff;border:1px solid #ddd;border-radius:16px;padding:28px;box-shadow:0 12px 34px rgba(0,0,0,.08)}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f7;color:#171717;padding:24px}
+.card{width:min(94vw,760px);background:#fff;border:1px solid #ddd;border-radius:16px;padding:28px;box-shadow:0 12px 34px rgba(0,0,0,.08)}
 h1{font-size:1.45rem;margin:0 0 6px}.sub{margin:0 0 24px;color:#666}.field{margin:14px 0}.field label{display:block;font-size:.9rem;margin-bottom:6px}
-input[type=text],input[type=password]{width:100%;padding:12px;border:1px solid #bbb;border-radius:10px;font:inherit}.remember{display:flex;gap:8px;align-items:center;margin:16px 0}
+input[type=text],input[type=password],select{width:100%;padding:12px;border:1px solid #bbb;border-radius:10px;font:inherit;background:inherit;color:inherit}.remember{display:flex;gap:8px;align-items:center;margin:16px 0}
 button{border:0;border-radius:10px;padding:11px 16px;font:inherit;cursor:pointer;background:#111;color:#fff}.wide{width:100%}.error{background:#fff1f1;border:1px solid #ffcccc;padding:10px;border-radius:9px;margin:12px 0}
-.row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid #eee}.row:last-child{border-bottom:0}.label{color:#666;font-size:.88rem}.value{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}.status{font-weight:700}.actions{display:flex;gap:10px;margin-top:22px}.ghost{background:#eee;color:#111}.small{font-size:.85rem;color:#777}.hidden{display:none}
-@media(prefers-color-scheme:dark){body{background:#111318;color:#eee}.card{background:#191c22;border-color:#333;box-shadow:none}.sub,.label,.small{color:#aaa}.row{border-color:#333}input[type=text],input[type=password]{background:#111318;color:#eee;border-color:#555}.ghost{background:#333;color:#eee}.error{background:#3a1717;border-color:#6e2929}}
+.row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #eee}.row:last-child{border-bottom:0}.label{color:#666;font-size:.88rem}.value{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}.status{font-weight:700}.actions{display:flex;gap:10px;margin-top:22px}.ghost{background:#eee;color:#111}.small{font-size:.85rem;color:#777}.hidden{display:none}
+.toolbar{margin:0 0 18px}.wan-list{display:grid;gap:14px}.wan-card{border:1px solid #ddd;border-radius:12px;padding:16px}.wan-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:4px}.wan-title h2{font-size:1.05rem;margin:0}.badge{font-size:.78rem;font-weight:700;padding:4px 8px;border-radius:999px;background:#eee}.copy-row{display:flex;align-items:center;gap:10px}.copy-row .value{flex:1}.meta{margin-top:18px}
+@media(prefers-color-scheme:dark){body{background:#111318;color:#eee}.card{background:#191c22;border-color:#333;box-shadow:none}.sub,.label,.small{color:#aaa}.row,.wan-card{border-color:#333}input[type=text],input[type=password],select{background:#111318;color:#eee;border-color:#555}.ghost,.badge{background:#333;color:#eee}.error{background:#3a1717;border-color:#6e2929}}
 """.strip()
 
 APP_JS = r"""
 (() => {
   const $ = (id) => document.getElementById(id);
-  const ip = $('wan2-ip');
-  if (!ip) return;
-  const updated = $('updated');
-  const status = $('status');
+  const selector = $('interface-select');
+  const list = $('wan-list');
+  if (!selector || !list) return;
+  const refreshed = $('page-refreshed');
   const client = $('client-ip');
-  const copy = $('copy-ip');
+  let current = null;
+
+  function formatTime(ts, human) {
+    if (!ts) return 'Never';
+    const exact = new Date(ts * 1000).toLocaleString(undefined, {hour12:false});
+    return human ? `${exact} · ${human}` : exact;
+  }
+
+  function addRow(card, label, value, className) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const left = document.createElement('div');
+    const lab = document.createElement('div');
+    lab.className = 'label';
+    lab.textContent = label;
+    const val = document.createElement('div');
+    val.className = className || '';
+    val.textContent = value;
+    left.append(lab, val);
+    row.append(left);
+    card.append(row);
+    return {row, val};
+  }
+
+  function renderCard(item) {
+    const card = document.createElement('section');
+    card.className = 'wan-card';
+
+    const title = document.createElement('div');
+    title.className = 'wan-title';
+    const h2 = document.createElement('h2');
+    h2.textContent = item.name;
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = item.active ? 'Active' : 'Inactive';
+    title.append(h2, badge);
+    card.append(title);
+
+    const ipRow = addRow(card, 'IPv4', item.ip || 'Not reported', 'value');
+    ipRow.row.classList.add('copy-row');
+    const copy = document.createElement('button');
+    copy.className = 'ghost';
+    copy.type = 'button';
+    copy.textContent = 'Copy IP';
+    copy.disabled = !item.ip;
+    copy.addEventListener('click', async () => {
+      if (!item.ip) return;
+      try {
+        await navigator.clipboard.writeText(item.ip);
+        copy.textContent = 'Copied';
+        setTimeout(() => copy.textContent = 'Copy IP', 1200);
+      } catch (_) {}
+    });
+    ipRow.row.append(copy);
+
+    addRow(card, 'Device', item.device || 'Unknown', 'value');
+    addRow(card, 'Last report status',
+      item.last_report_status === 'failed'
+        ? `Failed${item.last_report_error ? ' — ' + item.last_report_error : ''}`
+        : item.last_report_status === 'success' ? 'Success' : 'Never',
+      'status');
+    addRow(card, 'Last IP change', formatTime(item.changed_at, item.changed_human));
+    addRow(card, 'Last report', formatTime(item.last_report_at, item.last_report_human));
+    return card;
+  }
+
+  function render() {
+    if (!current) return;
+    const items = current.interfaces || [];
+    const previous = localStorage.getItem('wan2vault:selected') || 'all';
+    const names = new Set(items.map(x => x.name));
+    const selected = previous === 'all' || names.has(previous) ? previous : 'all';
+
+    const wantedOptions = ['all', ...items.map(x => x.name)];
+    const existingOptions = Array.from(selector.options).map(x => x.value);
+    if (wantedOptions.join('\0') !== existingOptions.join('\0')) {
+      selector.replaceChildren();
+      const all = document.createElement('option');
+      all.value = 'all';
+      all.textContent = 'All WANs';
+      selector.append(all);
+      for (const item of items) {
+        const option = document.createElement('option');
+        option.value = item.name;
+        option.textContent = item.name;
+        selector.append(option);
+      }
+    }
+    selector.value = selected;
+
+    list.replaceChildren();
+    const shown = selected === 'all' ? items : items.filter(x => x.name === selected);
+    if (!shown.length) {
+      const empty = document.createElement('p');
+      empty.className = 'small';
+      empty.textContent = 'No WAN interfaces have been reported yet.';
+      list.append(empty);
+    } else {
+      for (const item of shown) list.append(renderCard(item));
+    }
+  }
+
+  selector.addEventListener('change', () => {
+    localStorage.setItem('wan2vault:selected', selector.value);
+    render();
+  });
+
   async function refresh() {
     try {
       const r = await fetch('/api/v1/current', {cache:'no-store', credentials:'same-origin'});
       if (r.status === 401) { location.reload(); return; }
       if (!r.ok) throw new Error('request failed');
-      const d = await r.json();
-      ip.textContent = d.ip || 'Not reported';
-      updated.textContent = d.updated_human || 'Never';
-      status.textContent = d.status || 'Unknown';
-      client.textContent = d.client_ip || 'Unknown';
-      copy.disabled = !d.ip;
+      current = await r.json();
+      client.textContent = current.client_ip || 'Unknown';
+      refreshed.textContent = new Date().toLocaleString(undefined, {hour12:false});
+      render();
     } catch (_) {
-      status.textContent = 'Unavailable';
+      refreshed.textContent = 'Unavailable';
     }
   }
-  copy.addEventListener('click', async () => {
-    const v = ip.textContent.trim();
-    if (!v || v === 'Not reported') return;
-    try { await navigator.clipboard.writeText(v); copy.textContent = 'Copied'; setTimeout(() => copy.textContent='Copy IP', 1200); } catch (_) {}
-  });
+
   refresh();
   setInterval(refresh, 15000);
 })();
@@ -134,10 +239,9 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
 
 def _load_sessions() -> dict:
     try:
-        obj = _read_json(SESSIONS_FILE)
+        return _read_json(SESSIONS_FILE)
     except FileNotFoundError:
         return {}
-    return obj
 
 
 def _save_sessions(obj: dict) -> None:
@@ -180,6 +284,22 @@ def _safe_client_ip(value: str | None) -> str | None:
         return None
 
 
+def _safe_interface_name(value: object, *, default: str | None = None) -> str:
+    text = str(value if value is not None else "").strip()
+    if not text and default is not None:
+        text = default
+    if not NAME_RE.fullmatch(text):
+        raise ValueError("invalid_interface")
+    return text
+
+
+def _safe_device(value: object) -> str:
+    text = str(value if value is not None else "").strip()
+    if not DEVICE_RE.fullmatch(text):
+        raise ValueError("invalid_device")
+    return text
+
+
 def _human_age(seconds: int) -> str:
     if seconds < 0:
         return "just now"
@@ -192,14 +312,110 @@ def _human_age(seconds: int) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _status_for_age(age: int | None) -> str:
-    if age is None:
-        return "Unknown"
-    if age <= 45 * 60:
-        return "Online"
-    if age <= 2 * 60 * 60:
-        return "Stale"
-    return "Unknown"
+def _empty_current() -> dict:
+    return {"schema": 2, "interfaces": {}, "last_inventory_at": 0}
+
+
+def _normalize_current(obj: dict) -> dict:
+    if int(obj.get("schema", 0) or 0) == 2 and isinstance(obj.get("interfaces"), dict):
+        state = _empty_current()
+        state["last_inventory_at"] = int(obj.get("last_inventory_at", 0) or 0)
+        for raw_name, raw_record in obj["interfaces"].items():
+            if not isinstance(raw_record, dict):
+                continue
+            try:
+                name = _safe_interface_name(raw_name)
+                device = _safe_device(raw_record.get("device", ""))
+            except ValueError:
+                continue
+            ip = _safe_client_ip(str(raw_record.get("ip", ""))) if raw_record.get("ip") else None
+            if ip and ipaddress.ip_address(ip).version != 4:
+                ip = None
+            state["interfaces"][name] = {
+                "ip": ip,
+                "device": device,
+                "active": bool(raw_record.get("active", True)),
+                "changed_at": int(raw_record.get("changed_at", 0) or 0),
+                "last_report_at": int(raw_record.get("last_report_at", 0) or 0),
+                "last_report_status": str(raw_record.get("last_report_status", "") or ""),
+                "last_report_error": str(raw_record.get("last_report_error", "") or ""),
+            }
+        return state
+
+    ip = _safe_client_ip(str(obj.get("ip", ""))) if obj.get("ip") else None
+    if ip and ipaddress.ip_address(ip).version == 4:
+        ts = int(obj.get("updated_at", 0) or 0)
+        state = _empty_current()
+        state["interfaces"]["WAN2"] = {
+            "ip": ip,
+            "device": "",
+            "active": True,
+            "changed_at": ts,
+            "last_report_at": ts,
+            "last_report_status": "success" if ts else "",
+            "last_report_error": "",
+        }
+        return state
+    return _empty_current()
+
+
+def _load_current() -> dict:
+    try:
+        return _normalize_current(_read_json(CURRENT_FILE))
+    except (FileNotFoundError, ValueError, TypeError):
+        return _empty_current()
+
+
+def _public_current(state: dict, now: int, client_ip: str | None) -> dict:
+    items = []
+    for name, rec in state["interfaces"].items():
+        changed_at = int(rec.get("changed_at", 0) or 0)
+        report_at = int(rec.get("last_report_at", 0) or 0)
+        items.append({
+            "name": name,
+            "ip": rec.get("ip"),
+            "device": rec.get("device") or "",
+            "active": bool(rec.get("active", False)),
+            "changed_at": changed_at or None,
+            "changed_human": _human_age(max(0, now - changed_at)) if changed_at else "Never",
+            "last_report_at": report_at or None,
+            "last_report_human": _human_age(max(0, now - report_at)) if report_at else "Never",
+            "last_report_status": rec.get("last_report_status") or "",
+            "last_report_error": rec.get("last_report_error") or "",
+        })
+    items.sort(key=lambda x: (not x["active"], x["name"].casefold()))
+    primary = next((x for x in items if x["name"].casefold() == "wan2"), None)
+    if primary is None:
+        primary = next((x for x in items if x["active"]), items[0] if items else None)
+    return {
+        "schema": 2,
+        "interfaces": items,
+        "client_ip": client_ip,
+        "server_time": now,
+        "ip": primary.get("ip") if primary else None,
+        "updated_at": primary.get("changed_at") if primary else None,
+        "updated_human": primary.get("changed_human") if primary else "Never",
+        "status": "Online" if primary and primary.get("active") else "Unknown",
+    }
+
+
+def _record_failed_attempt(name: str, error: str) -> None:
+    now = int(time.time())
+    with STORE_LOCK:
+        state = _load_current()
+        rec = state["interfaces"].setdefault(name, {
+            "ip": None,
+            "device": "",
+            "active": False,
+            "changed_at": 0,
+            "last_report_at": 0,
+            "last_report_status": "",
+            "last_report_error": "",
+        })
+        rec["last_report_at"] = now
+        rec["last_report_status"] = "failed"
+        rec["last_report_error"] = error
+        _atomic_write_json(CURRENT_FILE, state)
 
 
 def _prune_login_state(now: float) -> None:
@@ -272,6 +488,16 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0 or length > MAX_BODY:
             return None
         return self.rfile.read(length)
+
+    def _parse_json_body(self) -> dict | None:
+        raw = self._read_body()
+        if raw is None:
+            return None
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return obj if isinstance(obj, dict) else None
 
     def _parse_form(self) -> dict[str, str] | None:
         raw = self._read_body()
@@ -353,14 +579,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dashboard_page(self, csrf: str) -> bytes:
         return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WAN2 Vault</title><link rel="stylesheet" href="/assets/style.css"></head>
-<body><main class="card"><h1>WeiG WAN2 Vault</h1><p class="sub">Current private WAN status</p>
-<div class="row"><div><div class="label">WAN2 IPv4</div><div id="wan2-ip" class="value">Loading…</div></div><button id="copy-ip" class="ghost" type="button">Copy IP</button></div>
-<div class="row"><div><div class="label">Status</div><div id="status" class="status">Loading…</div></div></div>
-<div class="row"><div><div class="label">Last report</div><div id="updated">Loading…</div></div></div>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WAN Vault</title><link rel="stylesheet" href="/assets/style.css"></head>
+<body><main class="card"><h1>WeiG WAN Vault</h1><p class="sub">Current private WAN status</p>
+<div class="toolbar"><label class="label" for="interface-select">Display interface</label><select id="interface-select"><option value="all">All WANs</option></select></div>
+<div id="wan-list" class="wan-list"><p class="small">Loading…</p></div>
+<div class="meta">
+<div class="row"><div><div class="label">Page refreshed</div><div id="page-refreshed">Loading…</div></div></div>
 <div class="row"><div><div class="label">Current client IP</div><div id="client-ip" class="value">Loading…</div></div></div>
+</div>
 <div class="actions"><form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="ghost" type="submit">Log out</button></form></div>
-<p class="small">WAN IP responses are never browser-cached.</p></main><script src="/assets/app.js" defer></script></body></html>""".encode("utf-8")
+<p class="small">WAN IP responses are never browser-cached. Display selection is stored only in this browser.</p></main><script src="/assets/app.js" defer></script></body></html>""".encode("utf-8")
 
     def do_GET(self) -> None:
         self._pending_cookie = None
@@ -384,21 +612,9 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 return self._json(401, {"error": "unauthorized"})
             now = int(time.time())
-            try:
-                current = _read_json(CURRENT_FILE)
-                ip = _safe_client_ip(str(current.get("ip", "")))
-                updated_at = int(current.get("updated_at", 0))
-                age = max(0, now - updated_at) if updated_at else None
-            except (FileNotFoundError, ValueError, TypeError):
-                ip, updated_at, age = None, 0, None
-            return self._json(200, {
-                "ip": ip,
-                "updated_at": updated_at or None,
-                "updated_human": _human_age(age) if age is not None else "Never",
-                "age_seconds": age,
-                "status": _status_for_age(age),
-                "client_ip": self._client_ip(),
-            })
+            with STORE_LOCK:
+                state = _load_current()
+            return self._json(200, _public_current(state, now, self._client_ip()))
 
         return self._reply(404, b"Not Found\n")
 
@@ -474,30 +690,106 @@ class Handler(BaseHTTPRequestHandler):
             authz = self.headers.get("Authorization", "")
             if not hmac.compare_digest(authz, f"Bearer {WRITE_TOKEN}"):
                 return self._json(401, {"error": "unauthorized"})
-            raw = self._read_body()
-            if raw is None:
+            payload = self._parse_json_body()
+            if payload is None:
                 return self._json(400, {"error": "bad_request"})
             try:
-                payload = json.loads(raw.decode("utf-8"))
+                name = _safe_interface_name(payload.get("interface"), default="WAN2")
+                device = _safe_device(payload.get("device", ""))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            try:
                 posted = str(ipaddress.ip_address(str(payload["ip"])))
                 if ipaddress.ip_address(posted).version != 4:
                     raise ValueError
-            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError):
+                _record_failed_attempt(name, "invalid_ipv4")
                 return self._json(400, {"error": "invalid_ipv4"})
 
             edge_ip = self._client_ip()
             if not edge_ip:
+                _record_failed_attempt(name, "cloudflare_source_required")
                 return self._json(403, {"error": "cloudflare_source_required"})
             try:
                 if ipaddress.ip_address(edge_ip).version != 4:
+                    _record_failed_attempt(name, "ipv4_source_required")
                     return self._json(403, {"error": "ipv4_source_required"})
             except ValueError:
+                _record_failed_attempt(name, "invalid_source")
                 return self._json(403, {"error": "invalid_source"})
             if not hmac.compare_digest(posted, edge_ip):
+                _record_failed_attempt(name, "source_mismatch")
                 return self._json(403, {"error": "source_mismatch"})
 
+            now = int(time.time())
             with STORE_LOCK:
-                _atomic_write_json(CURRENT_FILE, {"ip": posted, "updated_at": int(time.time())})
+                state = _load_current()
+                old = state["interfaces"].get(name, {})
+                old_ip = old.get("ip")
+                changed_at = int(old.get("changed_at", 0) or 0)
+                if old_ip != posted or not changed_at:
+                    changed_at = now
+                state["interfaces"][name] = {
+                    "ip": posted,
+                    "device": device,
+                    "active": True,
+                    "changed_at": changed_at,
+                    "last_report_at": now,
+                    "last_report_status": "success",
+                    "last_report_error": "",
+                }
+                _atomic_write_json(CURRENT_FILE, state)
+            self.send_response(204)
+            self._security_headers()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if self.path == "/api/v1/inventory":
+            authz = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(authz, f"Bearer {WRITE_TOKEN}"):
+                return self._json(401, {"error": "unauthorized"})
+            if not self._client_ip():
+                return self._json(403, {"error": "cloudflare_source_required"})
+            payload = self._parse_json_body()
+            if payload is None or not isinstance(payload.get("interfaces"), list):
+                return self._json(400, {"error": "bad_request"})
+            raw_items = payload["interfaces"]
+            if len(raw_items) > MAX_INTERFACES:
+                return self._json(400, {"error": "too_many_interfaces"})
+            inventory: dict[str, str] = {}
+            try:
+                for item in raw_items:
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid_inventory")
+                    name = _safe_interface_name(item.get("name"))
+                    device = _safe_device(item.get("device", ""))
+                    if name in inventory:
+                        raise ValueError("duplicate_interface")
+                    inventory[name] = device
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+
+            now = int(time.time())
+            with STORE_LOCK:
+                state = _load_current()
+                for name, rec in state["interfaces"].items():
+                    rec["active"] = name in inventory
+                for name, device in inventory.items():
+                    rec = state["interfaces"].setdefault(name, {
+                        "ip": None,
+                        "device": "",
+                        "active": True,
+                        "changed_at": 0,
+                        "last_report_at": 0,
+                        "last_report_status": "",
+                        "last_report_error": "",
+                    })
+                    rec["active"] = True
+                    if device:
+                        rec["device"] = device
+                state["last_inventory_at"] = now
+                _atomic_write_json(CURRENT_FILE, state)
             self.send_response(204)
             self._security_headers()
             self.send_header("Content-Length", "0")
