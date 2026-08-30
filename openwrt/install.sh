@@ -3,8 +3,10 @@ set -eu
 
 RAW_BASE="${WAN2VAULT_RAW_BASE:-https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main}"
 CONFIG_FILE="/etc/wan2-vault.conf"
-REPORTER="/etc/wan2-ipnotify.sh"
-HOTPLUG="/etc/hotplug.d/iface/95-wan2-ipnotify"
+REPORTER="/usr/bin/wan2-vault-report"
+CLI="/usr/bin/wan2-vault"
+VERSION_FILE="/usr/share/wan2-vault/VERSION"
+STATE_DIR="/etc/wan2-vault-state"
 CRON_FILE="/etc/crontabs/root"
 CRON_MARK="# WeiG-WAN2-Vault"
 SYSUPGRADE="/etc/sysupgrade.conf"
@@ -13,11 +15,11 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
 [ "$(id -u)" = "0" ] || fail "Run this installer as root."
-for cmd in ubus jsonfilter curl date sed; do
+for cmd in ubus jsonfilter curl sed grep sort; do
     command -v "$cmd" >/dev/null 2>&1 || fail "Missing required command: $cmd"
 done
 
-printf '\nWeiG WAN2 Vault - OpenWrt installer\n\n'
+printf '\nWeiG WAN Vault - OpenWrt installer\n\n'
 
 while :; do
     printf 'Public hostname (example: notify.example.com): '
@@ -32,19 +34,52 @@ while :; do
     esac
 done
 
-while :; do
-    printf 'WAN interface [WAN2]: '
-    IFS= read -r WAN_INTERFACE
-    WAN_INTERFACE="${WAN_INTERFACE:-WAN2}"
-    case "$WAN_INTERFACE" in
-        ''|*[!A-Za-z0-9_.:@-]*) echo "Invalid interface name." ;;
-        *) break ;;
-    esac
+printf '\nDetected WAN candidates:\n'
+FOUND=0
+for obj in $(ubus list 'network.interface.*' 2>/dev/null); do
+    name="${obj#network.interface.}"
+    [ "$name" = "$obj" ] && continue
+    [ "$name" = "loopback" ] && continue
+    status="$(ubus call "$obj" status 2>/dev/null || true)"
+    up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null || true)"
+    ip="$(printf '%s' "$status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null || true)"
+    dev="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+    targets="$(printf '%s' "$status" | jsonfilter -e '@.route[*].target' 2>/dev/null || true)"
+    if [ "$up" = "true" ] && [ -n "$ip" ] && [ -n "$dev" ] && printf '%s\n' "$targets" | grep -qx '0.0.0.0'; then
+        printf '  %-16s %-18s %s\n' "$name" "$ip" "$dev"
+        FOUND=1
+    fi
 done
+[ "$FOUND" -eq 1 ] || echo "  (none currently up; auto mode can discover them later)"
 
-if ! ubus call "network.interface.${WAN_INTERFACE}" status >/dev/null 2>&1; then
-    fail "OpenWrt interface '${WAN_INTERFACE}' does not exist."
-fi
+printf '\nTracking mode:\n'
+printf '  1) Auto - track every active IPv4 default-route WAN (recommended)\n'
+printf '  2) Manual - track only named OpenWrt interfaces\n'
+printf 'Select [1]: '
+IFS= read -r MODE_CHOICE
+MODE_CHOICE="${MODE_CHOICE:-1}"
+
+case "$MODE_CHOICE" in
+    1)
+        MODE="auto"
+        INTERFACES=""
+        ;;
+    2)
+        MODE="manual"
+        while :; do
+            printf 'Interfaces separated by spaces (example: WAN WAN2): '
+            IFS= read -r INTERFACES
+            [ -n "$INTERFACES" ] || { echo "At least one interface is required."; continue; }
+            valid=1
+            for name in $INTERFACES; do
+                case "$name" in ''|*[!A-Za-z0-9_.:@-]*) valid=0 ;; esac
+            done
+            [ "$valid" -eq 1 ] && break
+            echo "Invalid interface name."
+        done
+        ;;
+    *) fail "Invalid selection." ;;
+esac
 
 printf 'WRITE_TOKEN: '
 stty -echo
@@ -62,70 +97,68 @@ trap 'rm -rf "$TMP_DIR"; unset WRITE_TOKEN || true' EXIT INT TERM
 fetch_file() {
     rel="$1"
     out="$2"
-    if command -v wget >/dev/null 2>&1; then
-        wget -qO "$out" "$RAW_BASE/openwrt/$rel"
-    else
-        curl -fsSL "$RAW_BASE/openwrt/$rel" -o "$out"
-    fi
+    curl -fsSL "$RAW_BASE/openwrt/$rel" -o "$out"
 }
 
-SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd -P || true)"
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/wan2-ipnotify.sh" ]; then
-    cp "$SCRIPT_DIR/wan2-ipnotify.sh" "$TMP_DIR/wan2-ipnotify.sh"
-else
-    fetch_file "wan2-ipnotify.sh" "$TMP_DIR/wan2-ipnotify.sh"
-fi
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/95-wan2-ipnotify" ]; then
-    cp "$SCRIPT_DIR/95-wan2-ipnotify" "$TMP_DIR/95-wan2-ipnotify"
-else
-    fetch_file "95-wan2-ipnotify" "$TMP_DIR/95-wan2-ipnotify"
-fi
+fetch_file "wan2-ipnotify.sh" "$TMP_DIR/wan2-ipnotify.sh"
+fetch_file "wan2-vault" "$TMP_DIR/wan2-vault"
+curl -fsSL "$RAW_BASE/VERSION" -o "$TMP_DIR/VERSION"
 
 sh -n "$TMP_DIR/wan2-ipnotify.sh"
-sh -n "$TMP_DIR/95-wan2-ipnotify"
+sh -n "$TMP_DIR/wan2-vault"
 
 umask 077
 cat > "$CONFIG_FILE" <<EOF
 HOSTNAME='$HOSTNAME'
-WAN_INTERFACE='$WAN_INTERFACE'
+MODE='$MODE'
+INTERFACES='$INTERFACES'
 WRITE_TOKEN='$WRITE_TOKEN'
-REFRESH_INTERVAL='1800'
 EOF
 chmod 600 "$CONFIG_FILE"
 unset WRITE_TOKEN
 
-cp "$TMP_DIR/wan2-ipnotify.sh" "$REPORTER"
-chmod 700 "$REPORTER"
-mkdir -p /etc/hotplug.d/iface
-cp "$TMP_DIR/95-wan2-ipnotify" "$HOTPLUG"
-chmod 700 "$HOTPLUG"
+install -m 700 "$TMP_DIR/wan2-ipnotify.sh" "$REPORTER"
+install -m 700 "$TMP_DIR/wan2-vault" "$CLI"
+mkdir -p "$(dirname "$VERSION_FILE")" "$STATE_DIR/interfaces"
+install -m 644 "$TMP_DIR/VERSION" "$VERSION_FILE"
+chmod 700 "$STATE_DIR" "$STATE_DIR/interfaces"
 
 mkdir -p /etc/crontabs
 touch "$CRON_FILE"
 TMP_CRON="$TMP_DIR/root.cron"
 grep -vF "$CRON_MARK" "$CRON_FILE" > "$TMP_CRON" 2>/dev/null || true
+grep -vF "/etc/wan2-ipnotify.sh" "$TMP_CRON" > "$TMP_DIR/root.cron.clean" 2>/dev/null || true
 {
-    cat "$TMP_CRON"
-    echo "*/10 * * * * $REPORTER >/dev/null 2>&1 $CRON_MARK"
+    cat "$TMP_DIR/root.cron.clean"
+    echo "*/5 * * * * $REPORTER >/dev/null 2>&1 $CRON_MARK"
 } > "$CRON_FILE"
 chmod 600 "$CRON_FILE"
 /etc/init.d/cron restart >/dev/null 2>&1 || true
 
+rm -f /etc/hotplug.d/iface/95-wan2-ipnotify
+
 touch "$SYSUPGRADE"
-for f in "$CONFIG_FILE" "$REPORTER" "$HOTPLUG" "$CRON_FILE"; do
+for f in "$CONFIG_FILE" "$STATE_DIR" "$REPORTER" "$CLI" "$VERSION_FILE" "$CRON_FILE"; do
     grep -qxF "$f" "$SYSUPGRADE" 2>/dev/null || echo "$f" >> "$SYSUPGRADE"
 done
 
-info "Running first forced report through ${WAN_INTERFACE}."
-if FORCE=1 "$REPORTER"; then
+info "Running first report."
+if FORCE=1 FORCE_INVENTORY=1 "$REPORTER"; then
     echo
     echo "Installation complete."
-    echo "WAN interface: $WAN_INTERFACE"
+    echo "Mode:          $MODE"
+    [ "$MODE" = "manual" ] && echo "Interfaces:    $INTERFACES"
     echo "Hostname:      $HOSTNAME"
-    echo "Inbound HTTP/HTTPS ports opened by this project: 0"
+    echo "Check cadence: every 5 minutes"
+    echo
+    echo "Useful commands:"
+    echo "  wan2-vault status"
+    echo "  wan2-vault interfaces"
+    echo "  wan2-vault report"
+    echo "  wan2-vault upgrade"
 else
     echo
-    echo "Installed, but the first report failed."
+    echo "Installed, but the first report had errors."
     echo "Check: logread | grep wan2-vault"
     exit 2
 fi
