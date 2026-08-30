@@ -1,0 +1,16 @@
+#!/bin/sh
+
+CONFIG_FILE="/etc/wan2-vault.conf"
+[ -r "$CONFIG_FILE" ] || exit 0
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
+
+[ "$INTERFACE" = "$WAN_INTERFACE" ] || exit 0
+
+case "$ACTION" in
+    ifup|ifupdate)
+        /etc/wan2-ipnotify.sh >/dev/null 2>&1 &
+        ;;
+esac
+
+exit 0
