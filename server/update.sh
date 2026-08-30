@@ -79,15 +79,35 @@ install -o root -g root -m 0644 "$TMP_DIR/VERSION" "$VERSION_FILE"
 
 systemctl daemon-reload
 systemctl restart wan2-vault.service
-systemctl is-active --quiet wan2-vault.service
 
 HOSTNAME="$(python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["public_hostname"])
 PY
 )"
-HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: $HOSTNAME" http://127.0.0.1:29444/)"
-[ "$HTTP_CODE" = "200" ] || { echo "ERROR: local health check failed (HTTP $HTTP_CODE)" >&2; exit 1; }
+
+# Type=simple can report active before the Python process has bound its socket.
+# Wait for the actual HTTP endpoint instead of treating that startup race as a failed upgrade.
+HEALTHY=0
+HTTP_CODE="000"
+for attempt in $(seq 1 15); do
+    if systemctl is-active --quiet wan2-vault.service; then
+        HTTP_CODE="$(curl -sS --connect-timeout 1 -o /dev/null -w '%{http_code}' \
+            -H "Host: $HOSTNAME" http://127.0.0.1:29444/ 2>/dev/null || true)"
+        if [ "$HTTP_CODE" = "200" ]; then
+            HEALTHY=1
+            break
+        fi
+    fi
+    sleep 1
+done
+
+if [ "$HEALTHY" -ne 1 ]; then
+    echo "ERROR: upgraded service did not become healthy (last HTTP ${HTTP_CODE:-000})" >&2
+    systemctl status wan2-vault.service --no-pager -l >&2 || true
+    journalctl -u wan2-vault.service -n 50 --no-pager >&2 || true
+    exit 1
+fi
 
 SUCCESS=1
 trap - EXIT INT TERM
