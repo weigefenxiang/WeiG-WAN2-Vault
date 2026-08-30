@@ -1,16 +1,12 @@
-# OpenWrt Installation
+# OpenWrt installation
 
 ## Requirements
-
-The router must provide:
 
 ```text
 ubus
 jsonfilter
 curl
 ```
-
-No web server, DDNS package, Python runtime, or Node.js runtime is required on OpenWrt.
 
 ## Install
 
@@ -20,47 +16,78 @@ wget -O /tmp/wan2-vault-install.sh \
 sh /tmp/wan2-vault-install.sh
 ```
 
-Enter your own hostname, logical OpenWrt interface name, and WRITE_TOKEN at install time.
+The installer lists current IPv4 default-route WAN candidates and asks for a tracking mode.
 
-Example logical interface:
+### Auto
 
-```text
-WAN2
-```
+Tracks every interface that is:
 
-The scripts do not hard-code a PPP device name or ISP-assigned IPv4. They query netifd dynamically:
+- `up`;
+- has an IPv4 address;
+- has an `l3_device`;
+- has an IPv4 default route.
 
-```sh
-ubus call network.interface.WAN2 status
-```
+Recommended for routers where WAN ports may change.
 
-and read:
+### Manual
 
-```text
-ipv4-address[0].address
-l3_device
-```
-
-## Outbound interface binding
-
-The reporter uses:
+Track only named logical OpenWrt interfaces:
 
 ```sh
-curl -4 --interface "$WAN_DEV" ...
+wan2-vault interfaces set WAN WAN2
 ```
 
-This is an outbound client connection. It does not open TCP 443 on the router.
+Switch back to automatic discovery:
 
-## Immediate events and recovery
+```sh
+wan2-vault interfaces auto
+```
 
-Hotplug handles `ifup` and `ifupdate` for the selected interface.
+## Schedule
 
-A cron job runs every 10 minutes as a recovery mechanism. The reporter normally sends only when:
+The installer creates:
 
-- the current IPv4 differs from the last successfully reported IPv4; or
-- 30 minutes have elapsed since the last successful report.
+```text
+*/5 * * * * /usr/bin/wan2-vault-report
+```
 
-This gives the dashboard a meaningful freshness signal and recovers automatically after temporary DNS, Cloudflare, VPS, or network failures.
+The five-minute job does not blindly POST. State is stored in:
+
+```text
+/etc/wan2-vault-state/
+```
+
+If IPv4/device/inventory are unchanged, no Cloudflare or VPS request is made.
+
+## Commands
+
+```sh
+wan2-vault status
+wan2-vault version
+wan2-vault report
+wan2-vault interfaces
+wan2-vault interfaces auto
+wan2-vault interfaces set WAN WAN2
+wan2-vault upgrade
+```
+
+`wan2-vault report` forces all currently selected WANs plus the inventory to be sent.
+
+## v1.0 upgrade
+
+```sh
+wget -O /tmp/wan2-vault-update.sh \
+  https://raw.githubusercontent.com/weigefenxiang/WeiG-WAN2-Vault/main/openwrt/update.sh
+sh /tmp/wan2-vault-update.sh
+```
+
+For safety, a v1.0 `WAN_INTERFACE='WAN2'` configuration is migrated to manual tracking of WAN2 rather than suddenly uploading all other WAN interfaces.
+
+After verifying the upgrade:
+
+```sh
+wan2-vault interfaces auto
+```
 
 ## Logs
 
@@ -68,4 +95,4 @@ This gives the dashboard a meaningful freshness signal and recovers automaticall
 logread | grep wan2-vault
 ```
 
-The logger does not intentionally print the WRITE_TOKEN or WAN IPv4.
+Unchanged five-minute checks are intentionally silent to avoid log spam.
