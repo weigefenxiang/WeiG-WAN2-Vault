@@ -86,7 +86,7 @@ revoke_sessions() {
 }
 
 cat <<'EOF'
-WeiG WAN2 Vault management
+WeiG WAN Vault management
 
 1) Change login username/password
 2) Rotate WRITE_TOKEN
