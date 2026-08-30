@@ -29,14 +29,40 @@ The OpenWrt component performs outbound HTTPS only. It does not add firewall ACC
 
 ## Cloudflare trust boundary
 
-Every IP update requires:
+Every IP update requires the correct `WRITE_TOKEN` and must arrive through the configured Cloudflare ingress.
 
-1. the correct `WRITE_TOKEN`; and
-2. the posted IPv4 to match Cloudflare's `CF-Connecting-IP`.
+### Public WAN IPv4
 
-Multi-WAN sends a separate update through each WAN's own `l3_device`, so one request proves only the address of the egress path that carried it.
+For public WAN IPv4 records, the service additionally requires:
 
-The inventory endpoint carries interface names/devices and active state. It also requires the WRITE_TOKEN and a Cloudflare-provided client address, but inventory data never replaces the per-IP source match.
+```text
+posted IPv4 == CF-Connecting-IP
+```
+
+Multi-WAN sends a separate update through each WAN's own `l3_device`, so a public-WAN request proves the address of the egress path that carried it.
+
+A public source mismatch is rejected and does not replace the last successful IP record.
+
+### Private / CGNAT WAN IPv4
+
+The service also supports RFC1918 and CGNAT interface addresses:
+
+```text
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+100.64.0.0/10
+```
+
+These addresses cannot equal Cloudflare's public `CF-Connecting-IP`, so the public-IP equality check is not meaningful for them. Private/CGNAT records therefore rely on:
+
+1. the correct `WRITE_TOKEN`;
+2. the request arriving through Cloudflare; and
+3. the OpenWrt client binding the request to that WAN's `l3_device`.
+
+The dashboard explicitly marks these records as `Private / 私网`. This is a weaker proof of the posted interface address than the public-WAN source-IP equality check; protect the WRITE_TOKEN accordingly.
+
+The inventory endpoint carries interface names/devices and active state. It requires the WRITE_TOKEN and a Cloudflare-provided client address, but inventory data never substitutes for the public-WAN source match.
 
 A hostile local process on the VPS can forge HTTP headers. The localhost reverse proxy/cloudflared process and root-controlled proxy configuration are therefore part of the trusted computing base.
 
@@ -56,7 +82,7 @@ Persistent sessions use sliding renewal. Browser policy or site-data cleanup can
 
 Server upgrades validate downloaded code before activation and keep a pre-upgrade backup. Application configuration, authentication files and WRITE_TOKEN are not replaced by normal upgrades.
 
-OpenWrt upgrades preserve the existing secret configuration and migrate v1.0 single-WAN installs to manual tracking so an upgrade does not unexpectedly report additional WAN interfaces.
+OpenWrt upgrades preserve the existing secret configuration and migrate legacy single-WAN installs to manual tracking so an upgrade does not unexpectedly report additional WAN interfaces.
 
 ## Reporting vulnerabilities
 
