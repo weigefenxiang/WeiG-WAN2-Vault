@@ -15,6 +15,20 @@ version() {
     cat "$VERSION_FILE" 2>/dev/null || echo "1.0.0"
 }
 
+raw_fetch() {
+    local rel="$1" out="$2" sep="?" stamp
+    stamp="$(date +%s)"
+    [[ "$RAW_BASE" == *\?* ]] && sep="&"
+    curl -fsSL -H 'Cache-Control: no-cache' "${RAW_BASE}/${rel}${sep}_=${stamp}" -o "$out"
+}
+
+raw_stdout() {
+    local rel="$1" sep="?" stamp
+    stamp="$(date +%s)"
+    [[ "$RAW_BASE" == *\?* ]] && sep="&"
+    curl -fsSL -H 'Cache-Control: no-cache' "${RAW_BASE}/${rel}${sep}_=${stamp}"
+}
+
 status_cmd() {
     echo "WeiG WAN Vault"
     echo "Version: $(version)"
@@ -32,13 +46,15 @@ PY
 upgrade_cmd() {
     local tmp
     tmp="$(mktemp)"
-    curl -fsSL "$RAW_BASE/server/update.sh" -o "$tmp"
+    trap 'rm -f "$tmp"' RETURN
+    raw_fetch "server/update.sh" "$tmp"
     bash "$tmp"
     rm -f "$tmp"
+    trap - RETURN
 }
 
 check_update() {
-    remote="$(curl -fsSL "$RAW_BASE/VERSION" | sed -n '1p')"
+    remote="$(raw_stdout "VERSION" | sed -n '1p')"
     local_v="$(version)"
     echo "Installed: $local_v"
     echo "Latest:    $remote"
@@ -67,9 +83,11 @@ rollback_cmd() {
 manage_cmd() {
     local tmp
     tmp="$(mktemp)"
-    curl -fsSL "$RAW_BASE/server/manage.sh" -o "$tmp"
+    trap 'rm -f "$tmp"' RETURN
+    raw_fetch "server/manage.sh" "$tmp"
     bash "$tmp"
     rm -f "$tmp"
+    trap - RETURN
 }
 
 case "${1:-status}" in
